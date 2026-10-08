@@ -5,7 +5,7 @@ library and run by four workflows.
 
 | Workflow | Trigger | Runs |
 | --- | --- | --- |
-| [Submission check](../.github/workflows/pull-request.yml) | Pull requests (`pull_request_target`) | `python3 -m catalog pr` |
+| [Submission check](../.github/workflows/pull-request.yml) | Pull requests (`pull_request_target`) | `python3 -m catalog pr`, and in a second job the [release scan](#release-scan), `python3 -m catalog scan-pr` |
 | [CI](../.github/workflows/ci.yml) | Pull requests and pushes to `main` | Tests, `catalog check` and a website build; on `main` also `catalog push`, then the [website deployment](website.md#deployment) |
 | [Deploy fallback](../.github/workflows/deploy-fallback.yml) | Manual only, by the repository owner | The same deploy on the maintainer's own runner, for an Actions outage; see [Fallback deploy](website.md#fallback-deploy) |
 | [Catalog health](../.github/workflows/health.yml) | Daily 06:17 UTC and manual | `catalog health --slice today` |
@@ -41,8 +41,9 @@ For a pull request the checker:
 5. **Verifies the bytes without downloading them.** GitHub computes a SHA-256
    digest for every release asset and reports it in the API. The check requires
    it to equal `sha256`. If the asset is ever replaced, GitHub's digest changes
-   and the listing stops matching. Artifacts are never downloaded, opened or
-   executed (see [artifact formats](artifact-formats.md)). The format check
+   and the listing stops matching. This job never downloads, opens or
+   executes an artifact (see [artifact formats](artifact-formats.md)); the
+   separate [release scan](#release-scan) downloads and reads it. The format check
    still recognises `.ffpkg` and `.ffpfsc` names, so that a listing made before
    ZIP became the only accepted format keeps validating; that a new listing or
    a new release is a `.zip` is checked in review.
@@ -60,12 +61,65 @@ The workflow uses `pull_request_target`, so it runs the **base branch's**
 workflow and checker, never the pull request's. It checks out `main`, fetches the
 PR head as a git ref, and reads the changed records with `git show` as plain
 data. PR code is never checked out or executed, so a submission can't alter the
-rules it is judged by. The token is read-only, no secrets are used, artifacts
-are never downloaded, and the only file fetched (the icon) is size-bounded. Actions are pinned to commit SHAs and kept current by
+rules it is judged by. The token is read-only, no secrets are used, this job
+downloads no artifact, and the only file it fetches (the icon) is size-bounded. Actions are pinned to commit SHAs and kept current by
 Dependabot.
 
 The CI workflow does run PR code (tests), with the standard read-only
 `pull_request` token and no secrets.
+
+## Release scan
+
+A second job of the submission check, **Scan the release**, downloads the ZIP a
+pull request lists and reads it without running anything
+(`python3 -m catalog scan-pr`, `catalog/scan.py`). It answers one question for
+the reviewer: **can this app leave the PS5's sandbox, and how?** A title that
+stays inside can crash itself; one that reaches the payload loader or ships a
+payload can reach the kernel, and with it everything on the console.
+
+The report is in the job's summary, with its warnings as annotations:
+
+| It looks at | And reports |
+| --- | --- |
+| The archive | Entries that would unpack outside the app's folder, links and encrypted entries (these fail the check); where the app's folder is; Windows or macOS programs, scripts, and disk images it can't look inside |
+| Every executable (`eboot.bin`, modules, payloads, libraries) | The system libraries it links to, and which functions on a watch list it imports: network, loading code at run time, making memory executable, processes, system state, installing titles, accounts. PS5 executables name imports by a hash (the NID), so the scan hashes the watch list and compares |
+| Ways out of the sandbox | The payload loader's address (127.0.0.1, port 9021 or 9020) held as data or built in code; a request file for a resident jailbreak service (`elevate_proc`, `etahen_jailbreak`); payload files, with their SHA-256; executables hidden inside other files |
+| Code | System call instructions the title makes itself, with their numbers (a full table of them is a statically linked system library and is reported as such); code that is packed or encrypted |
+| Patterns ([`catalog/scan_rules.yar`](../catalog/scan_rules.yar)) | The payload SDK's kernel read and write routines, credential patching, raw memory, flash and disk devices, system folders, mounting |
+
+How to read it:
+
+- **"This app can leave the sandbox"** is common and not an accusation: half of
+  the catalog elevates, usually to reach `/data`. It tells the reviewer where
+  to look: the payload files and what they contain.
+- **"It is unclear whether this app leaves the sandbox"** means only weak
+  evidence was found, such as the loader's port number as a constant in code
+  that can also connect to 127.0.0.1. Several apps share a library with such a
+  constant; the source settles it.
+- **"No sign that this app leaves the sandbox"** means none of the known routes
+  was found. It is not proof. Code can build an address at run time or unpack a
+  payload from data, and a scan of this kind won't see it.
+- Only an archive that is unsafe to unpack, or unreadable, fails the check.
+  Everything else is information.
+
+The job is isolated because it handles files nobody has reviewed, with
+libraries that parse them: it has no secrets, no token in its environment or
+checkout, and read-only permissions. Like the submission check it runs the base
+branch's code, so a pull request can't change the scanner that reads it.
+
+It uses three libraries, pinned in [`requirements-scan.txt`](../requirements-scan.txt)
+and needed by nothing else: pyelftools (ELF files), Capstone (disassembly) and
+yara-python (pattern rules). Without one of them, that part of the scan is
+skipped and the report says so.
+
+To scan by hand:
+
+```sh
+python3 -m pip install -r requirements-scan.txt
+python3 -m catalog scan PPSA99000            # download and scan a listed release
+python3 -m catalog scan                      # every listed release (about 2 GB of downloads)
+python3 -m catalog scan --zip app.zip PPSA12345
+```
 
 ## Push to `main`
 

@@ -64,6 +64,95 @@ def cmd_verify(args) -> int:
     return report.emit("Catalog verification", f"{len(selected)} record(s) verified.")
 
 
+def _report_scan(scan, name: str, title: str, report: Report) -> None:
+    """Put a scan's findings in the report (errors and warnings) and its full text in the job summary."""
+    from .scan import markdown
+    for level, text in scan.findings:
+        if level != "notice":
+            getattr(report, level)(name, text.replace("`", ""))
+    report.notice(name, f"release scan: {scan.verdict}; the full report is in the job summary")
+    text = markdown(scan, title)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    else:
+        print(text)
+
+
+def cmd_scan(args) -> int:
+    """Scan the release archive of listed apps, or a ZIP file on disk."""
+    from .scan import scan_archive, scan_release
+    report = Report()
+    if args.zip:
+        if len(args.titleids) != 1:
+            report.error("scan", "--zip needs exactly one title ID: the folder the archive should hold")
+        else:
+            titleid = args.titleids[0].upper()
+            _report_scan(scan_archive(Path(args.zip), titleid), args.zip, titleid, report)
+        return report.emit("Release scan", "Scanned.")
+    records = [r for r in load_catalog(APPS, report) if not r.reserved]
+    wanted = {t.upper() for t in args.titleids}
+    for titleid in sorted(wanted - {r.titleid for r in records}):
+        report.error(f"apps/{titleid}.json", "no listed app with this title ID")
+    selected = [r for r in records if not wanted or r.titleid in wanted]
+    with tempfile.TemporaryDirectory(prefix="catalog-scan-") as tmp:
+        for record in selected:
+            name = f"apps/{record.path.name}"
+            if not record.asset_name.lower().endswith(".zip"):
+                report.notice(name, "not a ZIP archive; not scanned")
+                continue
+            _report_scan(scan_release(record.data, Path(tmp)), name,
+                         f"{record.data['name']} ({record.titleid}) {record.data['version']}", report)
+    return report.emit("Release scan", f"{len(selected)} release(s) scanned.")
+
+
+def cmd_scan_pr(args) -> int:
+    """CI: scan the releases a pull request lists. Base-branch code; PR files are read only as data.
+
+    The job that runs this has no secrets and a read-only token: it downloads files nobody has
+    reviewed. Only an archive that is unsafe to unpack fails the check; everything else is a report
+    for the reviewer.
+    """
+    from .records import record_problems
+    from .scan import scan_release
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+    pull = event["pull_request"]
+    head = "refs/catalog/pr-head"
+    git("fetch", "--no-tags", "--quiet", "origin", f"+refs/pull/{pull['number']}/head:{head}")
+    base = git("merge-base", "HEAD", head).strip()
+    report = Report()
+    scanned = 0
+    with tempfile.TemporaryDirectory(prefix="catalog-scan-") as tmp:
+        for change in diff_changes(base, head):
+            if change.status == "D" or not RECORD_PATH.fullmatch(change.path):
+                continue
+            if int(git("cat-file", "-s", f"{head}:{change.path}")) > MAX_FILE_BYTES:
+                continue
+            try:
+                data = json.loads(git_bytes("show", f"{head}:{change.path}").decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue        # the submission check reports a record that can't be read
+            if not isinstance(data, dict) or record_problems(data) or data.get("artifact_url") is None:
+                continue
+            if Path(change.path).stem != data["titleid"]:
+                continue
+            old_path = ROOT / change.path
+            if old_path.is_file():
+                try:
+                    if json.loads(old_path.read_text(encoding="utf-8")).get("sha256") == data["sha256"]:
+                        continue        # the same file as listed: nothing new to scan
+                except ValueError:
+                    pass
+            if not data["artifact_url"].lower().endswith(".zip"):
+                report.notice(change.path, "not a ZIP archive; not scanned")
+                continue
+            scanned += 1
+            _report_scan(scan_release(data, Path(tmp)), change.path,
+                         f"{data['name']} ({data['titleid']}) {data['version']}", report)
+    return report.emit("Release scan", f"{scanned} release(s) scanned; the reports are above.")
+
+
 HEALTH_SLICES = 7
 
 
@@ -545,6 +634,14 @@ def main(argv: list[str] | None = None) -> int:
 
     pr = commands.add_parser("pr", help="CI: validate the pull request in GITHUB_EVENT_PATH")
     pr.set_defaults(func=cmd_pr)
+
+    scan = commands.add_parser("scan", help="download and statically scan release archives (needs requirements-scan.txt)")
+    scan.add_argument("titleids", nargs="*", help="title IDs to scan (default: every listed app)")
+    scan.add_argument("--zip", help="scan this ZIP file instead of downloading; give its title ID")
+    scan.set_defaults(func=cmd_scan)
+
+    scan_pr = commands.add_parser("scan-pr", help="CI: scan the releases listed by the pull request in GITHUB_EVENT_PATH")
+    scan_pr.set_defaults(func=cmd_scan_pr)
 
     push = commands.add_parser("push", help="CI: validate records changed by a push")
     push.add_argument("--before", default="")
