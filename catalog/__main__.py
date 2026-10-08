@@ -99,11 +99,13 @@ def cmd_scan(args) -> int:
     for titleid in sorted(wanted - {r.titleid for r in records}):
         report.error(f"apps/{titleid}.json", "no listed app with this title ID")
     selected = [r for r in records if not wanted or r.titleid in wanted]
+    rows = []       # one line per release, for the overview of a scan of several
     with tempfile.TemporaryDirectory(prefix="catalog-scan-") as tmp:
         for record in selected:
             name = f"apps/{record.path.name}"
             if not record.asset_name.lower().endswith(".zip"):
                 report.notice(name, "not a ZIP archive; not scanned")
+                rows.append((record, None, 0))
                 continue
             scan = scan_release(record.data, Path(tmp), attest=True)
             if args.helpers:
@@ -114,9 +116,40 @@ def cmd_scan(args) -> int:
                                           f"{info.path.rsplit('/', 1)[-1]}", "titleid": record.titleid,
                                           "version": record.data["version"], "source": record.data["source_repo"]}) + ",")
                 continue
-            check_helpers(scan, approved)
+            unapproved = check_helpers(scan, approved)
+            rows.append((record, scan, unapproved))
             _report_scan(scan, name, f"{record.data['name']} ({record.titleid}) {record.data['version']}", report)
+    if len(rows) > 1 and not args.helpers:
+        _scan_overview(rows)
     return report.emit("Release scan", f"{len(selected)} release(s) scanned.")
+
+
+def _scan_overview(rows) -> None:
+    """One table for a scan of several releases: where each app stands."""
+    words = {"stays": "stays in the sandbox", "leaves": "leaves the sandbox", "unclear": "unclear",
+             "unreadable": "not scanned"}
+    lines = ["## Overview", "", "| App | Title ID | Version | Sandbox | How | Helpers | Not reviewed | Build attested |",
+             "| --- | --- | --- | --- | --- | ---: | ---: | --- |"]
+    counts: dict[str, int] = {}
+    for record, scan, unapproved in rows:
+        d = record.data
+        if scan is None:
+            verdict, how, helpers, attested = "not scanned (not a ZIP)", "", "", ""
+        else:
+            verdict, how = words[scan.sandbox], ", ".join(scan.routes)
+            helpers = str(len(scan.payloads)) if scan.downloaded else ""
+            attested = {True: "yes", False: "no", None: "not checked"}[scan.attested] if scan.downloaded else ""
+        counts[verdict] = counts.get(verdict, 0) + 1
+        lines.append(f"| {d['name'].replace('|', ' ')} | `{d['titleid']}` | {d['version']} | {verdict} | {how} | "
+                     f"{helpers} | {unapproved if scan is not None and unapproved else ''} | {attested} |")
+    lines += ["", "Totals: " + ", ".join(f"{n} {word}" for word, n in sorted(counts.items(), key=lambda c: -c[1])) + ".", ""]
+    text = "\n".join(lines) + "\n"
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(text)
+    else:
+        print(text)
 
 
 def cmd_scan_all(args) -> int:

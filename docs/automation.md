@@ -8,6 +8,7 @@ library and run by four workflows.
 | [Submission check](../.github/workflows/pull-request.yml) | Pull requests (`pull_request_target`) | `python3 -m catalog pr`, and in a second job the [release scan](#release-scan), `python3 -m catalog scan-pr` |
 | [CI](../.github/workflows/ci.yml) | Pull requests and pushes to `main` | Tests, `catalog check` and a website build; on `main` also `catalog push`, then the [website deployment](website.md#deployment) |
 | [Deploy fallback](../.github/workflows/deploy-fallback.yml) | Manual only, by the repository owner | The same deploy on the maintainer's own runner, for an Actions outage; see [Fallback deploy](website.md#fallback-deploy) |
+| [Scan the catalog](../.github/workflows/scan-catalog.yml) | Manual only | `catalog scan`: one report on every listed app, or on the title IDs given; see [Release scan](#release-scan) |
 | [Catalog health](../.github/workflows/health.yml) | Daily 06:17 UTC and manual | `catalog health --slice today` |
 | [Release updates](../.github/workflows/updates.yml) | Daily 07:37 UTC and manual | `catalog updates --open-prs` |
 | [Discovery](../.github/workflows/discovery.yml) | Daily 06:53 UTC and manual | `catalog discover --open-prs --issue` |
@@ -154,6 +155,19 @@ The site build reads those summaries as data and shows them on each app's page
 under **Safety**, and publishes them in the store API as `safety`
 ([Store API](api.md#safety)). If that job fails, the site is built without the
 labels rather than not at all.
+
+### One report for the whole catalog
+
+**Scan the catalog** is a manual workflow (Actions → Scan the catalog → Run
+workflow). It scans every listed release again, or only the title IDs you give
+it, and writes one report in the run's summary: an overview table (sandbox
+verdict, how the app leaves it, helpers, helpers not reviewed, build
+attestation) followed by the full findings for each app. It changes nothing.
+Use it after changing the scanner or the approved helper list, or to see where
+apps listed before the scan existed stand.
+
+The labels on the site are refreshed by CI's **Scan listed releases** job, not
+by this one; run CI by hand to refresh them without a merge.
 
 ### Isolation
 
