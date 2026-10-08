@@ -102,10 +102,69 @@ How to read it:
 - Only an archive that is unsafe to unpack, or unreadable, fails the check.
   Everything else is information.
 
-The job is isolated because it handles files nobody has reviewed, with
-libraries that parse them: it has no secrets, no token in its environment or
-checkout, and read-only permissions. Like the submission check it runs the base
-branch's code, so a pull request can't change the scanner that reads it.
+### Approved helpers
+
+A payload is the part of an app that runs outside the sandbox, so it is the
+part worth reading. [`helpers/approved.json`](../helpers/approved.json) lists
+the payloads a maintainer has read and accepted, each by its SHA-256. The scan
+compares every payload in a release with that list:
+
+- on the list: a note naming the entry;
+- not on the list: a warning, with the payload's SHA-256.
+
+A hash matches one exact file, and a helper is usually rebuilt for every
+release, so a new release of an app that elevates is flagged until a
+maintainer has looked at it. That is the intent: nothing reaches the kernel
+unread. To approve, read the helper's source at the release tag, then add the
+entries this prints to the list, on `main`:
+
+```sh
+python3 -m catalog scan --helpers PPSA12345
+```
+
+The pull request's check uses the list on `main`, so a pull request can't
+approve its own helper.
+
+### What changed since the listed release
+
+When a pull request updates an app, the scan also downloads the release that
+is listed now and reports the differences: a changed verdict, a new way out of
+the sandbox, new or changed payloads, system functions and libraries the
+executable did not use before, hosts it did not name before, and large changes
+in size. A trusted app turning hostile shows up here first.
+
+### Built by GitHub Actions?
+
+The scan asks GitHub whether a workflow of the app's repository built exactly
+this file (`gh attestation verify`, which checks the signature and the file's
+digest). A developer gets this by building the release in GitHub Actions with
+[`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance).
+The result is one of:
+
+- **attested**: a signed statement ties this file to a workflow run and a commit;
+- **released by a workflow**: a workflow attached the file to the release, which
+  shows less, since it may have been built elsewhere;
+- **built by the developer**: uploaded by hand; nothing ties it to the source.
+
+### Labels on the website and in the API
+
+After each merge a second job, **Scan listed releases**, writes a small summary
+per listed release (kept by the file's SHA-256, so a release is scanned once).
+The site build reads those summaries as data and shows them on each app's page
+under **Safety**, and publishes them in the store API as `safety`
+([Store API](api.md#safety)). If that job fails, the site is built without the
+labels rather than not at all.
+
+### Isolation
+
+The jobs are isolated because they handle files nobody has reviewed, with
+libraries that parse them: no secrets, no credentials in the checkout, and a
+read-only token used only to ask GitHub for build attestations.
+
+Like the submission check, the pull request's scan runs the base branch's code,
+so a pull request can't change the scanner that reads it. The deploy job, which
+holds the signing key, never runs the scanner: it only reads the summaries, and
+checks each field.
 
 It uses three libraries, pinned in [`requirements-scan.txt`](../requirements-scan.txt)
 and needed by nothing else: pyelftools (ELF files), Capstone (disassembly) and

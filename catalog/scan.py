@@ -35,6 +35,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 RULES = Path(__file__).with_name("scan_rules.yar")
+APPROVED_HELPERS = Path(__file__).resolve().parents[1] / "helpers" / "approved.json"
+SCANNER = 2             # raised when what a scan records changes, so kept summaries are made again
+SANDBOX = ("stays", "leaves", "unclear", "unreadable")
+ROUTES = ("loader", "service", "payload")
 
 MAX_ARCHIVE_BYTES = 2 << 30          # as for a release asset
 MAX_UNPACKED_BYTES = 8 << 30
@@ -159,6 +163,8 @@ class Executable:
     rules: list[tuple[str, str, str, list[str]]] = field(default_factory=list)   # rule, level, says, examples
     loader: list[str] = field(default_factory=list)                  # evidence that it reaches the payload loader
     maybe: list[str] = field(default_factory=list)                   # weaker evidence of the same
+    routes: set[str] = field(default_factory=set)                    # "loader", "service"
+    hosts: list[str] = field(default_factory=list)                   # hosts named in URLs inside it
     syscalls: dict[int, int] = field(default_factory=dict)           # number -> count (-1: number unknown)
     embedded: list[int] = field(default_factory=list)                # offsets of other executables inside
     entropy: float = 0.0
@@ -175,6 +181,11 @@ class Scan:
     executables: list[Executable] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)                 # parts of the scan that could not run
     sha256: str = ""
+    attested: bool | None = None                                     # a verified build attestation; None: not checked
+    workflow: str | None = None                                      # the workflow that built it, when attested
+    comparison: list[str] = field(default_factory=list)              # what changed since the listed release
+    downloaded: bool = True
+    compared_with: str = ""
 
     def add(self, level: str, text: str) -> None:
         if (level, text) not in self.findings:
@@ -185,12 +196,30 @@ class Scan:
         return any(x.role == "payload" or x.loader for x in self.executables)
 
     @property
+    def sandbox(self) -> str:
+        """One word for the verdict, as the API publishes it."""
+        return "unreadable" if self.failed or not self.downloaded else "leaves" if self.elevates else "unclear" if self.unclear else "stays"
+
+    @property
+    def payloads(self) -> list[Executable]:
+        return [x for x in self.executables if x.role == "payload"]
+
+    @property
+    def routes(self) -> list[str]:
+        found = {route for x in self.executables for route in x.routes}
+        if self.payloads:
+            found.add("payload")
+        return [route for route in ROUTES if route in found]
+
+    @property
     def unclear(self) -> bool:
         """Something points at the loader, but not firmly enough to say the app uses it."""
         return not self.elevates and any(x.maybe for x in self.executables)
 
     @property
     def verdict(self) -> str:
+        if not self.downloaded:
+            return "the archive could not be downloaded, so nothing was scanned"
         if self.failed:
             return "the archive is unsafe to unpack or could not be read"
         if self.elevates:
@@ -216,18 +245,24 @@ def fetch_archive(url: str, target: Path) -> None:
             out.write(block)
 
 
-def scan_release(data: dict, workdir: Path) -> Scan:
-    """Download and scan the archive a record's data points to."""
+def scan_release(data: dict, workdir: Path, attest: bool = False) -> Scan:
+    """Download and scan the archive a record's data points to; with `attest`, ask for its build attestation."""
     from . import artifacts
     target = workdir / f"{data['titleid']}.zip"
     try:
         fetch_archive(data["artifact_url"], target)
     except (artifacts.DownloadError, OSError) as error:
-        scan = Scan(data["titleid"])
+        scan = Scan(data["titleid"], downloaded=False)
         scan.add("warning", f"the archive could not be downloaded, so nothing was scanned: {error}")
         return scan
     try:
-        return scan_archive(target, data["titleid"], data["sha256"])
+        scan = scan_archive(target, data["titleid"], data["sha256"])
+        if attest and not scan.failed:
+            repository = data["source_repo"].removeprefix("https://github.com/")
+            scan.attested, scan.workflow, note = attested_build(target, repository)
+            if scan.attested is None:
+                scan.skipped.append(note)
+        return scan
     finally:
         target.unlink(missing_ok=True)
 
@@ -312,6 +347,18 @@ def _payload_imports(elffile_module, image: bytes, info: Executable) -> None:
     info.watched = {group: sorted(names) for group, names in watched.items()}
 
 
+def _has_soname(image: bytes) -> bool:
+    """Whether a plain ELF names itself as a shared library (DT_SONAME)."""
+    try:
+        dynamic = next((x for x in _segments(image) if x[0] == 2), None)
+        if dynamic is None:
+            return False
+        return any(struct.unpack_from("<q", image, dynamic[2] + i * 16)[0] == 14
+                   for i in range(min(dynamic[5] // 16, 4096)))
+    except struct.error:
+        return False
+
+
 def _executable_ranges(image: bytes) -> list[tuple[int, int]]:
     return [(s[2], s[5]) for s in _segments(image) if s[0] == 1 and s[1] & 1 and s[2] + s[5] <= len(image)]
 
@@ -383,6 +430,7 @@ def _code_facts(capstone, image: bytes, info: Executable, count_syscalls: bool) 
                     elif value in (port, swapped) and instruction.mnemonic in ("mov", "movabs", "push"):
                         ports[port] += 1
     if addresses:
+        info.routes.add("loader")
         info.loader.append(f"builds a socket address for the loader's port in code ({addresses} place(s))")
     loopback = b"127.0.0.1" in image
     connects = any(name in ("connect", "sceNetConnect") for names in info.watched.values() for name in names)
@@ -407,8 +455,10 @@ def _apply_rules(compiled, data: bytes, info: Executable) -> None:
         info.rules.append((match.rule, match.meta.get("level", "notice"), match.meta.get("says", match.rule),
                            examples[:MAX_LISTED]))
         if match.rule == "loader_address_in_data":
+            info.routes.add("loader")
             info.loader.append("holds the loader's address (127.0.0.1 and its port) as data")
         if match.rule == "elevation_request":
+            info.routes.add("service")
             info.loader.append("asks a resident jailbreak service to lift its sandbox ("
                                + ", ".join(f"`{e}`" for e in examples[:3]) + ")")
 
@@ -447,8 +497,12 @@ def inspect_executable(path: str, data: bytes, scan: Scan, compiled=None) -> Exe
     else:
         # A plain ELF. One built against the console's system libraries is a payload: what the
         # payload loader runs, outside the sandbox. Anything else is code the app loads itself
-        # (an emulator core, a plug-in), which runs with the app's own rights.
-        info.role = "payload" if re.search(rb"libkernel(_web|_sys)?\.s?prx\0", image) else "library"
+        # (an emulator core, a plug-in), which runs with the app's own rights. A library names
+        # itself one; a payload carries the SDK's kernel routines in its start-up code.
+        links = re.search(rb"libkernel(_web|_sys)?\.s?prx\0", image)
+        kernel = re.search(rb"KERNEL_ADDRESS_|kernel_copyin|kernel_set_ucred", image)
+        shared = name.endswith((".so", ".prx", ".sprx")) or _has_soname(image)
+        info.role = "payload" if kernel or (links and not shared) else "library"
     elftools, capstone, _yara = _libraries()
     try:
         if info.role in ("payload", "library"):
@@ -463,6 +517,8 @@ def inspect_executable(path: str, data: bytes, scan: Scan, compiled=None) -> Exe
     if info.entropy > 7.3:
         info.notes.append(f"its code has very high entropy ({info.entropy:.1f} of 8): packed or encrypted")
     info.embedded = _embedded(image)
+    info.hosts = sorted({m.group(1).decode().lower().rstrip(".")
+                         for m in re.finditer(rb"https?://([A-Za-z0-9][A-Za-z0-9.-]{2,80})", image)})[:200]
     if compiled is not None:
         _apply_rules(compiled, image, info)
         if info.role == "library" and any(rule == "payload_sdk_kernel_access" for rule, *_ in info.rules):
@@ -616,6 +672,147 @@ def _conclude(scan: Scan) -> None:
         scan.add("warning", "no title executable was found to examine")
 
 
+def load_approved(path: Path = APPROVED_HELPERS) -> dict[str, dict]:
+    """The approved helpers, by sha256. A helper is a payload a maintainer has read and accepted."""
+    import json
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {entry["sha256"]: entry for entry in data.get("helpers", [])
+            if isinstance(entry, dict) and re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", "")))}
+
+
+def check_helpers(scan: Scan, approved: dict[str, dict]) -> int:
+    """Say which payloads are on the approved list; returns how many are not."""
+    unknown = 0
+    for info in scan.payloads:
+        entry = approved.get(info.sha256)
+        if entry:
+            scan.add("notice", f"`{info.path}` is on the approved helper list: {entry.get('name', 'unnamed')}")
+        else:
+            unknown += 1
+            scan.add("warning", f"`{info.path}` is NOT on the approved helper list (sha256 `{info.sha256}`): "
+                                "read its source before listing, then add it to `helpers/approved.json`")
+    return unknown
+
+
+def attested_build(archive: Path, repository: str) -> tuple[bool | None, str | None, str]:
+    """(verified, workflow, note): whether GitHub holds a build attestation for exactly this file.
+
+    `gh attestation verify` checks the signature, that it names this file's digest and that it was
+    made by a workflow of `repository`. None when it can't be checked here (no gh, or no token).
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+    if not shutil.which("gh") or not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        return None, None, "build attestation not checked (needs the gh tool and a token)"
+    try:
+        done = subprocess.run(["gh", "attestation", "verify", str(archive), "--repo", repository, "--format", "json"],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, None, f"build attestation not checked ({type(error).__name__})"
+    if done.returncode != 0:
+        if "unknown command" in done.stderr:
+            return None, None, "build attestation not checked (this gh is too old)"
+        return False, None, "no verified build attestation: nothing ties this file to a workflow run"
+    workflow = None
+    try:
+        result = json.loads(done.stdout)[0]["verificationResult"]
+        certificate = (result.get("signature") or {}).get("certificate") or {}
+        workflow = certificate.get("buildSignerURI") or None
+        if not workflow:
+            parameters = result["statement"]["predicate"]["buildDefinition"]["externalParameters"]["workflow"]
+            workflow = f"{parameters['repository']}/{parameters['path']}@{parameters['ref']}"
+        workflow = str(workflow).removeprefix("https://github.com/")[:300]
+    except (ValueError, LookupError, TypeError):
+        pass
+    return True, workflow, "built by a GitHub Actions workflow of its repository (attestation verified)"
+
+
+def compare(old: Scan, new: Scan) -> list[str]:
+    """What a reviewer should know changed between the listed release and the proposed one."""
+    lines = []
+    if old.sandbox != new.sandbox:
+        lines.append(f"**Verdict changed:** {old.verdict} → {new.verdict}")
+    for route in new.routes:
+        if route not in old.routes:
+            lines.append(f"**New way out of the sandbox:** {route}")
+    before = {x.path.rsplit('/', 1)[-1]: x for x in old.executables}
+    for info in new.executables:
+        name = info.path.rsplit("/", 1)[-1]
+        earlier = before.pop(name, None)
+        if earlier is None:
+            lines.append(f"New {info.role}: `{info.path}` (sha256 `{info.sha256}`)")
+            continue
+        if info.role == "payload" and info.sha256 != earlier.sha256:
+            lines.append(f"Payload `{name}` changed (was `{earlier.sha256[:16]}…`, now `{info.sha256[:16]}…`)")
+        if info.role != earlier.role:
+            lines.append(f"`{name}` was a {earlier.role} and is now a {info.role}")
+        added = sorted(set(info.libraries) - set(earlier.libraries))
+        if added:
+            lines.append(f"`{name}` now links to: {', '.join(added)}")
+        for group in sorted(info.watched):
+            fresh = sorted(set(info.watched[group]) - set(earlier.watched.get(group, [])))
+            if fresh:
+                lines.append(f"`{name}` now imports ({group}): {', '.join(f'`{n}`' for n in fresh)}")
+        hosts = sorted(set(info.hosts) - set(earlier.hosts))
+        if hosts:
+            shown = ", ".join(f"`{h}`" for h in hosts[:MAX_LISTED]) + (" and more" if len(hosts) > MAX_LISTED else "")
+            lines.append(f"`{name}` names new hosts: {shown}")
+        rules = sorted({r[2] for r in info.rules} - {r[2] for r in earlier.rules})
+        for says in rules:
+            lines.append(f"`{name}` newly {says}")
+        if not earlier.embedded and info.embedded:
+            lines.append(f"`{name}` now has another executable inside it")
+        if info.size > earlier.size * 1.5 or info.size < earlier.size * 0.5:
+            lines.append(f"`{name}` changed size a lot: {earlier.size:,} → {info.size:,} bytes")
+    for name, gone in sorted(before.items()):
+        lines.append(f"Removed {gone.role}: `{gone.path}`")
+    return lines
+
+
+def summary(scan: Scan) -> dict:
+    """What the website and the store API need from a scan, as plain data."""
+    return {
+        "scanner": SCANNER,
+        "sha256": scan.sha256,
+        "titleid": scan.titleid,
+        "sandbox": scan.sandbox,
+        "routes": scan.routes,
+        "payloads": [{"path": x.path, "sha256": x.sha256} for x in scan.payloads],
+        "network": any("network" in x.watched for x in scan.executables),
+        "attested": scan.attested,
+        "workflow": scan.workflow,
+    }
+
+
+def read_summary(data, sha256: str) -> dict | None:
+    """A kept summary, checked field by field: it was written by a job that handles unreviewed files."""
+    if not isinstance(data, dict) or data.get("scanner") != SCANNER or data.get("sha256") != sha256:
+        return None
+    if data.get("sandbox") not in SANDBOX or not isinstance(data.get("network"), bool):
+        return None
+    routes, payloads = data.get("routes"), data.get("payloads")
+    if not isinstance(routes, list) or any(r not in ROUTES for r in routes) or not isinstance(payloads, list):
+        return None
+    clean = []
+    for item in payloads[:64]:
+        if not isinstance(item, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
+            return None
+        clean.append({"path": str(item.get("path", ""))[:200], "sha256": item["sha256"]})
+    attested, workflow = data.get("attested"), data.get("workflow")
+    if attested not in (True, False, None) or not (workflow is None or isinstance(workflow, str)):
+        return None
+    if workflow is not None and not re.fullmatch(r"[A-Za-z0-9_.@/+-]{1,300}", workflow):
+        workflow = None
+    return {"scanner": SCANNER, "sha256": sha256, "titleid": str(data.get("titleid", ""))[:9],
+            "sandbox": data["sandbox"], "routes": [r for r in ROUTES if r in routes], "payloads": clean,
+            "network": data["network"], "attested": attested, "workflow": workflow if attested else None}
+
+
 def markdown(scan: Scan, title: str) -> str:
     """The report for a pull request's job summary."""
     lines = [f"## Release scan: {title}", ""]
@@ -627,6 +824,16 @@ def markdown(scan: Scan, title: str) -> str:
     lines += [verdict, "",
               f"Archive: {scan.entries} entries, {scan.unpacked:,} bytes unpacked, sha256 `{scan.sha256}`. "
               "Nothing from it was run.", ""]
+    if scan.attested is True:
+        lines += [f"Build: attested. GitHub holds a signed statement that a workflow of the app's repository "
+                  f"built exactly this file{f' (`{scan.workflow}`)' if scan.workflow else ''}.", ""]
+    elif scan.attested is False:
+        lines += ["Build: not attested. Nothing ties this file to a workflow run, so it may have been built "
+                  "anywhere, from any source.", ""]
+    if scan.compared_with:
+        lines += [f"### Changes since {scan.compared_with}", ""]
+        lines += [f"- {line}" for line in scan.comparison] or ["- Nothing the scan looks at changed."]
+        lines.append("")
     order = {"error": 0, "warning": 1, "notice": 2}
     if scan.findings:
         lines += ["| Level | Finding |", "| --- | --- |"]
@@ -644,6 +851,10 @@ def markdown(scan: Scan, title: str) -> str:
             known = ", ".join(f"{n}×{c}" for n, c in sorted(info.syscalls.items()) if n >= 0)
             total = sum(info.syscalls.values())
             lines.append(f"- {total} system call instruction(s) of its own" + (f" (numbers: {known})" if known else ""))
+        if info.hosts:
+            shown = ", ".join(info.hosts[:MAX_LISTED]) + (f" and {len(info.hosts) - MAX_LISTED} more"
+                                                          if len(info.hosts) > MAX_LISTED else "")
+            lines.append(f"- Hosts named in URLs: {shown}")
         if info.embedded:
             lines.append(f"- Other executable images inside, at offsets {', '.join(hex(o) for o in info.embedded[:8])}")
         for note in info.notes:

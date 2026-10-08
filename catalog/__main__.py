@@ -82,14 +82,17 @@ def _report_scan(scan, name: str, title: str, report: Report) -> None:
 
 def cmd_scan(args) -> int:
     """Scan the release archive of listed apps, or a ZIP file on disk."""
-    from .scan import scan_archive, scan_release
+    from .scan import check_helpers, load_approved, scan_archive, scan_release
     report = Report()
+    approved = load_approved()
     if args.zip:
         if len(args.titleids) != 1:
             report.error("scan", "--zip needs exactly one title ID: the folder the archive should hold")
         else:
             titleid = args.titleids[0].upper()
-            _report_scan(scan_archive(Path(args.zip), titleid), args.zip, titleid, report)
+            scan = scan_archive(Path(args.zip), titleid)
+            check_helpers(scan, approved)
+            _report_scan(scan, args.zip, titleid, report)
         return report.emit("Release scan", "Scanned.")
     records = [r for r in load_catalog(APPS, report) if not r.reserved]
     wanted = {t.upper() for t in args.titleids}
@@ -102,9 +105,59 @@ def cmd_scan(args) -> int:
             if not record.asset_name.lower().endswith(".zip"):
                 report.notice(name, "not a ZIP archive; not scanned")
                 continue
-            _report_scan(scan_release(record.data, Path(tmp)), name,
-                         f"{record.data['name']} ({record.titleid}) {record.data['version']}", report)
+            scan = scan_release(record.data, Path(tmp), attest=True)
+            if args.helpers:
+                # Entries for helpers/approved.json, to paste after reading each helper's source.
+                for info in scan.payloads:
+                    if info.sha256 not in approved:
+                        print(json.dumps({"sha256": info.sha256, "name": f"{record.data['name']}: "
+                                          f"{info.path.rsplit('/', 1)[-1]}", "titleid": record.titleid,
+                                          "version": record.data["version"], "source": record.data["source_repo"]}) + ",")
+                continue
+            check_helpers(scan, approved)
+            _report_scan(scan, name, f"{record.data['name']} ({record.titleid}) {record.data['version']}", report)
     return report.emit("Release scan", f"{len(selected)} release(s) scanned.")
+
+
+def cmd_scan_all(args) -> int:
+    """CI: a summary of every listed release's scan, for the website and the store API.
+
+    A summary is kept by the file's sha256, so a release is downloaded and scanned once. The job
+    that runs this handles unreviewed files and has no secrets; the build reads its output as data.
+    """
+    from .scan import SCANNER, read_summary, scan_release, summary
+    report = Report()
+    cache, out = Path(args.cache), Path(args.out)
+    cache.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+    records = [r for r in load_catalog(APPS, Report()) if not r.reserved and r.asset_name.lower().endswith(".zip")]
+    scanned = 0
+    with tempfile.TemporaryDirectory(prefix="catalog-scan-") as tmp:
+        for record in records:
+            sha256 = record.data["sha256"]
+            kept = cache / f"{sha256}.json"
+            data = None
+            if kept.is_file():
+                try:
+                    data = read_summary(json.loads(kept.read_text(encoding="utf-8")), sha256)
+                except (OSError, ValueError):
+                    data = None
+            if data is None:
+                scan = scan_release(record.data, Path(tmp), attest=True)
+                scanned += 1
+                if not scan.downloaded or scan.sha256 != sha256:
+                    report.warning(f"apps/{record.path.name}", "not scanned: " + scan.verdict
+                                   if not scan.downloaded else "not scanned: the file is not the listed one")
+                    continue
+                data = summary(scan)
+                kept.write_text(json.dumps(data), encoding="utf-8")
+                report.notice(f"apps/{record.path.name}", f"scanned: {scan.verdict}")
+            (out / f"{sha256}.json").write_text(json.dumps(data), encoding="utf-8")
+    wanted = {f"{r.data['sha256']}.json" for r in records}
+    for entry in cache.glob("*.json"):
+        if entry.name not in wanted:
+            entry.unlink()
+    return report.emit("Release scans", f"{len(records)} release(s), {scanned} scanned now (scanner {SCANNER}).")
 
 
 def cmd_scan_pr(args) -> int:
@@ -115,7 +168,8 @@ def cmd_scan_pr(args) -> int:
     for the reviewer.
     """
     from .records import record_problems
-    from .scan import scan_release
+    from .scan import check_helpers, compare, load_approved, scan_release
+    approved = load_approved()
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     pull = event["pull_request"]
     head = "refs/catalog/pr-head"
@@ -138,18 +192,33 @@ def cmd_scan_pr(args) -> int:
             if Path(change.path).stem != data["titleid"]:
                 continue
             old_path = ROOT / change.path
+            listed = None
             if old_path.is_file():
                 try:
-                    if json.loads(old_path.read_text(encoding="utf-8")).get("sha256") == data["sha256"]:
+                    listed = json.loads(old_path.read_text(encoding="utf-8"))
+                    if listed.get("sha256") == data["sha256"]:
                         continue        # the same file as listed: nothing new to scan
                 except ValueError:
-                    pass
+                    listed = None
             if not data["artifact_url"].lower().endswith(".zip"):
                 report.notice(change.path, "not a ZIP archive; not scanned")
                 continue
             scanned += 1
-            _report_scan(scan_release(data, Path(tmp)), change.path,
-                         f"{data['name']} ({data['titleid']}) {data['version']}", report)
+            scan = scan_release(data, Path(tmp), attest=True)
+            check_helpers(scan, approved)
+            if scan.attested is False:
+                report.notice(change.path, "no verified build attestation: nothing ties this file to a workflow run")
+            # An update: scan the listed release too and say what changed.
+            if (scan.downloaded and isinstance(listed, dict) and not record_problems(listed)
+                    and str(listed.get("artifact_url") or "").lower().endswith(".zip")):
+                before = scan_release(listed, Path(tmp))
+                if before.downloaded and not before.failed:
+                    scan.compared_with = f"the listed release, {listed['version']}"
+                    scan.comparison = compare(before, scan)
+                    for line in scan.comparison:
+                        if line.startswith("**") or line.startswith("New payload") or line.startswith("Payload"):
+                            report.warning(change.path, "since the listed release: " + line.replace("*", "").replace("`", ""))
+            _report_scan(scan, change.path, f"{data['name']} ({data['titleid']}) {data['version']}", report)
     return report.emit("Release scan", f"{scanned} release(s) scanned; the reports are above.")
 
 
@@ -528,7 +597,8 @@ def cmd_build(args) -> int:
     count = build_site(Path(args.out), APPS, report, base=args.base, site_url=args.site_url,
                        fetch_icons=not args.no_icons, theme=args.theme,
                        icon_cache=Path(args.icon_cache) if args.icon_cache else None,
-                       github=None if args.no_icons else GitHub())
+                       github=None if args.no_icons else GitHub(),
+                       scans=Path(args.scans) if args.scans else None)
     return report.emit("Site build", f"Built {count} app page(s) into {args.out}.")
 
 
@@ -606,6 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--theme", default=DEFAULT_THEME, choices=sorted(THEMES))
     build.add_argument("--no-icons", action="store_true", help="offline build: no icons (placeholders) and no release facts in the API")
     build.add_argument("--icon-cache", help="directory that keeps fetched icons and release facts between builds")
+    build.add_argument("--scans", help="directory of release scan summaries (catalog scan-all --out), for the safety labels")
     build.set_defaults(func=cmd_build)
 
     sign = commands.add_parser("sign", help="CI: sign the built API's manifest with CATALOG_SIGNING_KEY")
@@ -638,7 +709,14 @@ def main(argv: list[str] | None = None) -> int:
     scan = commands.add_parser("scan", help="download and statically scan release archives (needs requirements-scan.txt)")
     scan.add_argument("titleids", nargs="*", help="title IDs to scan (default: every listed app)")
     scan.add_argument("--zip", help="scan this ZIP file instead of downloading; give its title ID")
+    scan.add_argument("--helpers", action="store_true",
+                      help="print helpers/approved.json entries for the payloads that aren't on the list")
     scan.set_defaults(func=cmd_scan)
+
+    scan_all = commands.add_parser("scan-all", help="CI: write a scan summary per listed release, scanning only new files")
+    scan_all.add_argument("--cache", required=True, help="directory that keeps summaries between runs")
+    scan_all.add_argument("--out", required=True, help="directory for the summaries of the listed releases")
+    scan_all.set_defaults(func=cmd_scan_all)
 
     scan_pr = commands.add_parser("scan-pr", help="CI: scan the releases listed by the pull request in GITHUB_EVENT_PATH")
     scan_pr.set_defaults(func=cmd_scan_pr)

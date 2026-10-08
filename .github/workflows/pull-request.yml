@@ -38,8 +38,8 @@ jobs:
   scan:
     name: Scan the release
     # Downloads and reads files nobody has reviewed, with libraries that parse them. So this job
-    # gets nothing worth taking: no secrets, no token in the environment or the checkout, and
-    # read-only permissions. It runs the base branch's scanner; the pull request's files are data.
+    # gets nothing worth taking: no secrets, no credentials in the checkout, and a read-only
+    # token that is used only to ask GitHub for a release's build attestation. It runs the base branch's scanner; the pull request's files are data.
     # Nothing from an archive is executed. Only an archive that is unsafe to unpack fails it.
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -57,3 +57,5 @@ jobs:
       - run: python3 -m pip install --disable-pip-version-check -r requirements-scan.txt
       - name: Scan the listed release for ways out of the sandbox
         run: python3 -m catalog scan-pr
+        env:
+          GH_TOKEN: ${{ github.token }}   # read-only: `gh attestation verify` needs one

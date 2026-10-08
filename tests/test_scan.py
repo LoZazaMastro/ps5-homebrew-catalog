@@ -123,6 +123,59 @@ class ScanTests(unittest.TestCase):
         self.assertFalse(result.elevates)
         self.assertEqual(result.executables[1].role, "library")
 
+    def test_helpers_are_checked_against_the_approved_list(self):
+        import hashlib
+        import json
+        result = self.app(signed(title_elf()), **{"helper.elf": payload_elf()})
+        digest = hashlib.sha256(payload_elf()).hexdigest()
+        self.assertEqual(scan.check_helpers(result, {}), 1)
+        self.assertTrue(any(level == "warning" and "NOT on the approved helper list" in text and digest in text
+                            for level, text in result.findings))
+        listed = Path(self.tmp.name) / "approved.json"
+        listed.write_text(json.dumps({"helpers": [{"sha256": digest, "name": "Test helper"}, {"sha256": "nope"}]}))
+        approved = scan.load_approved(listed)
+        self.assertEqual(list(approved), [digest])
+        again = self.app(signed(title_elf()), **{"helper.elf": payload_elf()})
+        self.assertEqual(scan.check_helpers(again, approved), 0)
+        self.assertTrue(any(level == "notice" and "Test helper" in text for level, text in again.findings))
+        self.assertEqual(scan.load_approved(Path(self.tmp.name) / "missing.json"), {})
+        # The list in the repository is well formed.
+        self.assertTrue(all(len(k) == 64 for k in scan.load_approved()))
+
+    def test_comparison_with_the_listed_release(self):
+        old = self.app(signed(title_elf(imports=("printf",))))
+        new = self.app(signed(title_elf(imports=("printf", "connect"), extra=b"\x00https://evil.example/x\x00")),
+                       **{"helper.elf": payload_elf()})
+        lines = scan.compare(old, new)
+        text = "\n".join(lines)
+        self.assertIn("**Verdict changed:**", text)
+        self.assertIn("**New way out of the sandbox:** payload", text)
+        self.assertIn("New payload: `" + TITLE + "/helper.elf`", text)
+        self.assertIn("now imports (network): `connect`", text)
+        self.assertIn("names new hosts: `evil.example`", text)
+        self.assertEqual(scan.compare(old, old), [])
+        new.compared_with, new.comparison = "the listed release, 1.0", lines
+        self.assertIn("### Changes since the listed release, 1.0", scan.markdown(new, "Test"))
+
+    def test_summary_round_trip_and_distrust(self):
+        result = self.app(signed(title_elf(imports=("connect",))), **{"helper.elf": payload_elf()})
+        result.attested, result.workflow = True, "owner/repo/.github/workflows/release.yml@refs/tags/v1"
+        data = scan.summary(result)
+        self.assertEqual((data["sandbox"], data["routes"], data["network"], len(data["payloads"])),
+                         ("leaves", ["payload"], True, 1))
+        self.assertEqual(scan.read_summary(data, result.sha256), data)
+        for change in ({"sandbox": "safe"}, {"scanner": 0}, {"routes": ["magic"]}, {"network": "yes"},
+                       {"payloads": [{"sha256": "<script>"}]}, {"attested": "true"}):
+            self.assertIsNone(scan.read_summary({**data, **change}, result.sha256), change)
+        self.assertIsNone(scan.read_summary(data, "0" * 64))
+        self.assertIsNone(scan.read_summary({**data, "workflow": "<b>x</b>"}, result.sha256)["workflow"])
+
+    def test_attestation_is_not_claimed_when_it_cannot_be_checked(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+            self.assertIsNone(scan.attested_build(Path(self.tmp.name) / "x.zip", "owner/repo")[0])
+
     def test_unsafe_archives_fail(self):
         for files, links in (({"../outside.txt": "x"}, ()), ({f"{TITLE}/a": "x"}, (f"{TITLE}/link",)),
                              ({"/abs.txt": "x"}, ())):
