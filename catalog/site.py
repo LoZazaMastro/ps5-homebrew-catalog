@@ -17,7 +17,7 @@ substituted.
 
 Icons are fetched and re-served from the site, resized to WebP when Pillow is
 installed. With an icon cache directory, an icon is fetched again only when its
-cached copy is older than a day (an icon URL may name a branch, where the file
+cached copy is older than an hour (an icon URL may name a branch, where the file
 can change); entries no longer used are pruned. A failed icon falls back to a placeholder instead of failing the
 build.
 """
@@ -361,7 +361,7 @@ def png_icons(data: bytes) -> dict[int, bytes]:
     return icons
 
 
-ICON_MAX_AGE = 24 * 60 * 60  # seconds a cached original is used before it is fetched again
+ICON_MAX_AGE = 60 * 60  # seconds a cached original is used before it is fetched again
 
 
 def _icon(url: str, cache: Path | None, fetch=None) -> tuple[bytes, str, bytes]:
@@ -406,27 +406,30 @@ def _prepare_output(out: Path) -> None:
 
 
 def _install_steps(record: Record) -> str:
+    """The install steps as markup. Each carries its words' key, so the page can show them in the
+    reader's language (site/shared/i18n.js); the English here is what a browser without the script shows."""
     d = record.data
     name = f"<code>{e(unquote(record.asset_name))}</code>"
     loader = '<a href="https://github.com/drakmor/ShadowMountPlus">ShadowMountPlus</a>'
     if artifact_format(record) == "zip":
         steps = [
-            f"Download {name} and extract it on your computer.",
-            f"Copy the extracted <code>{e(d['titleid'])}/</code> folder to <code>/data/homebrew/</code> on your PS5, for example over FTP.",
-            f"A loader such as {loader} picks it up. Launch {e(d['name'])} from the home screen.",
+            ("step.zip.1", f"Download {name} and extract it on your computer."),
+            ("step.zip.2", f"Copy the extracted <code>{e(d['titleid'])}/</code> folder to <code>/data/homebrew/</code> on your PS5, for example over FTP."),
+            ("step.zip.3", f"A loader such as {loader} picks it up. Launch {e(d['name'])} from the home screen."),
         ]
     else:
         steps = [
-            f"Download {name}.",
-            "Copy the file as-is to <code>/data/homebrew/</code> on your PS5, for example over FTP.",
-            f"{loader} mounts the image. Launch {e(d['name'])} from the home screen.",
+            ("step.img.1", f"Download {name}."),
+            ("step.img.2", "Copy the file as-is to <code>/data/homebrew/</code> on your PS5, for example over FTP."),
+            ("step.img.3", f"{loader} mounts the image. Launch {e(d['name'])} from the home screen."),
         ]
-    return "\n".join(f"<li>{step}</li>" for step in steps)
+    args = f' data-v-file="{e(unquote(record.asset_name))}" data-v-titleid="{e(d["titleid"])}" data-v-name="{e(d["name"])}"'
+    return "\n".join(f'<li data-i18n-html="{key}"{args}>{step}</li>' for key, step in steps)
 
 
 def _install_steps_text(record: Record) -> list[str]:
     """The install steps as plain text, for TV mode."""
-    return [html.unescape(re.sub(r"<[^>]+>", "", step)) for step in re.findall(r"<li>(.*?)</li>", _install_steps(record))]
+    return [html.unescape(re.sub(r"<[^>]+>", "", step)) for step in re.findall(r"<li[^>]*>(.*?)</li>", _install_steps(record))]
 
 
 def _commit_time_html(iso: str | None) -> str:
@@ -435,7 +438,8 @@ def _commit_time_html(iso: str | None) -> str:
         return ""
     from datetime import datetime
     when = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
-    return f' · last updated <time datetime="{iso}">{when.day} {when:%b %Y, %H:%M} UTC</time>'
+    return (f'<span data-i18n="foot.updated" data-v-time="{iso}"> · last updated '
+            f'{when.day} {when:%b %Y, %H:%M} UTC</span>')
 
 
 def _utc(iso: str | None) -> str | None:
@@ -605,6 +609,8 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
     # A theme may bring its own script and favicon; otherwise the shared ones are used.
     own = {name: theme_obj.directory / name for name in ("app.js", "favicon.svg")}
     js = assets.add("app", "js", (own["app.js"] if own["app.js"].is_file() else shared_dir / "app.js").read_bytes())
+    i18n = assets.add("i18n", "js", (shared_dir / "i18n.js").read_bytes())
+    analytics = assets.add("analytics", "js", (shared_dir / "analytics.js").read_bytes())
     placeholder = assets.add("placeholder", "svg", (shared_dir / "placeholder.svg").read_bytes())
     shutil.copyfile(own["favicon.svg"] if own["favicon.svg"].is_file() else shared_dir / "favicon.svg",
                     root / "favicon.svg")
@@ -679,25 +685,30 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
         facts = safety.get(record.id)
         if not facts:
             return ""
-        sandbox = {"stays": ("good", "Stays in the sandbox", "The scan found no way for this app to reach beyond "
-                             "its own files: no payload, no connection to the payload loader, no request to a "
-                             "jailbreak service."),
-                   "leaves": ("care", "Leaves the sandbox", "This app can get full access to the console, usually "
-                              "to read and write files outside its own folder. Install it only if you trust its "
-                              "developer."),
-                   "unclear": ("care", "Sandbox: unclear", "The scan found weak signs that this app may reach the "
-                               "payload loader, and could not settle it.")}[facts["sandbox"]]
-        chips = [f'<li class="safety__chip safety__chip--{sandbox[0]}">{sandbox[1]}</li>']
-        lines = [sandbox[2]]
+        # Each sentence carries its words' key (site/shared/i18n.js); the English is what the build writes.
+        sandbox = {"stays": ("good", "sb.stays", "Stays in the sandbox", "The scan found no way for this app to reach "
+                             "beyond its own files: no payload, no connection to the payload loader, no request to "
+                             "a jailbreak service."),
+                   "leaves": ("care", "sb.leaves", "Leaves the sandbox", "This app can get full access to the console, "
+                              "usually to read and write files outside its own folder. Install it only if you trust "
+                              "its developer."),
+                   "unclear": ("care", "sb.unclear", "Sandbox: unclear", "The scan found weak signs that this app may "
+                               "reach the payload loader, and could not settle it.")}[facts["sandbox"]]
+        chips = [f'<li class="safety__chip safety__chip--{sandbox[0]}" data-i18n="{sandbox[1]}">{sandbox[2]}</li>']
+        lines = [(sandbox[1] + ".text", "", sandbox[3])]
         if facts["helpers"]:
+            counts = f' data-v-n="{facts["helpers"]}" data-v-u="{facts["helpers_unapproved"]}"'
             if facts["helpers_unapproved"]:
-                chips.append(f'<li class="safety__chip safety__chip--care">{facts["helpers_unapproved"]} helper(s) not reviewed</li>')
-                lines.append(f"It ships {facts['helpers']} helper program(s) that run outside the sandbox; "
-                             f"{facts['helpers_unapproved']} of them the catalog's maintainers have not read.")
+                chips.append(f'<li class="safety__chip safety__chip--care" data-i18n="helpers.unrev" '
+                             f'data-v-n="{facts["helpers_unapproved"]}">{facts["helpers_unapproved"]} helper(s) not reviewed</li>')
+                lines.append(("helpers.unrev.text", counts,
+                              f"It ships {facts['helpers']} helper program(s) that run outside the sandbox; "
+                              f"{facts['helpers_unapproved']} of them the catalog's maintainers have not read."))
             else:
-                chips.append('<li class="safety__chip safety__chip--good">Helpers reviewed</li>')
-                lines.append(f"It ships {facts['helpers']} helper program(s) that run outside the sandbox, all "
-                             "on the catalog's list of reviewed helpers.")
+                chips.append('<li class="safety__chip safety__chip--good" data-i18n="helpers.ok">Helpers reviewed</li>')
+                lines.append(("helpers.ok.text", counts,
+                              f"It ships {facts['helpers']} helper program(s) that run outside the sandbox, all "
+                              "on the catalog's list of reviewed helpers."))
         build = {"attested": ("good", "Built by GitHub Actions", "GitHub holds a signed statement that a workflow of "
                               "the app's repository built exactly this file."),
                  "workflow": ("plain", "Released by a workflow", "A workflow of the app's repository attached this "
@@ -705,13 +716,13 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
                  "developer": ("plain", "Built by the developer", "The developer built and uploaded this file by "
                                "hand. Nothing ties it to the published source.")}.get(facts["build"])
         if build:
-            chips.append(f'<li class="safety__chip safety__chip--{build[0]}">{build[1]}</li>')
-            lines.append(build[2])
-        text = "".join(f"<p>{e(line)}</p>" for line in lines)
-        return ('<h2 id="safety-title">Safety</h2>\n'
-                f'<ul class="safety" aria-label="Scan results">{"".join(chips)}</ul>\n'
-                f'<div class="safety__text">{text}<p class="notes__source">From an automatic scan of the release '
-                'file, which is read and never run. It can miss things: it is not a guarantee. '
+            chips.append(f'<li class="safety__chip safety__chip--{build[0]}" data-i18n="build.{facts["build"]}">{build[1]}</li>')
+            lines.append((f"build.{facts['build']}.text", "", build[2]))
+        text = "".join(f'<p data-i18n="{key}"{args}>{e(line)}</p>' for key, args, line in lines)
+        return ('<h2 id="safety-title" data-i18n="safety.title">Safety</h2>\n'
+                f'<ul class="safety" aria-label="Scan results" data-i18n-attr="aria-label:safety.aria">{"".join(chips)}</ul>\n'
+                f'<div class="safety__text">{text}<p class="notes__source" data-i18n-html="safety.source">From an automatic '
+                'scan of the release file, which is read and never run. It can miss things: it is not a guarantee. '
                 '<a href="https://github.com/darkxex/ps5-homebrew-catalog/blob/main/docs/automation.md#release-scan">'
                 'How the scan works</a></p></div>')
 
@@ -720,11 +731,14 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
         body, cut = release_notes.as_html(known[record.id][0].notes)
         if not body:
             return ""
-        more = "Read the full notes on GitHub" if cut else "See this release on GitHub"
-        return ('<h2 id="notes-title">Release notes</h2>\n'
-                f'<div class="notes">\n{body}\n</div>\n'
-                f'<p class="notes__source">Written by {e(record.data["author"])} for {e(version_label(record.data["version"]))}. '
-                f'<a href="{e(release_url)}" rel="nofollow">{more}</a></p>')
+        more_key, more = ("notes.full", "Read the full notes on GitHub") if cut else ("notes.see", "See this release on GitHub")
+        author, version = e(record.data["author"]), e(version_label(record.data["version"]))
+        # The release notes themselves are the developer's words and stay as written.
+        return ('<h2 id="notes-title" data-i18n="notes.title">Release notes</h2>\n'
+                f'<div class="notes" data-translate data-translate-by="notes-title">\n{body}\n</div>\n'
+                f'<p class="notes__source"><span data-i18n="notes.source" data-v-author="{author}" data-v-version="{version}">'
+                f'Written by {author} for {version}. </span>'
+                f'<a href="{e(release_url)}" rel="nofollow" data-i18n="{more_key}">{more}</a></p>')
 
     def page_url(record: Record) -> str:
         return f"{base}app/{record.id}/"
@@ -739,8 +753,9 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
         if not others:
             return "", ""
         links = ", ".join(f'<a href="{e(page_url(r))}">{e(r.data["name"])}</a>' for r in others)
-        chip = "<li>The ID is not unique</li>"
-        note = (f'<p class="idnote">Another app is listed with the title ID <code>{e(record.titleid)}</code>: {links}. '
+        chip = '<li data-i18n="app.shared">The ID is not unique</li>'
+        note = (f'<p class="idnote" data-i18n-html="app.sharednote" data-v-titleid="{e(record.titleid)}" '
+                f'data-v-links="{e(links)}">Another app is listed with the title ID <code>{e(record.titleid)}</code>: {links}. '
                 'A console holds one app per title ID, so installing this one replaces the other and they share '
                 'save data.</p>')
         return chip, note
@@ -820,6 +835,8 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
         "submit_url": f"{REPO_URL}/blob/main/docs/submitting.md",
         "css": css,
         "js": js,
+        "i18n": i18n,
+        "analytics": analytics,
         "fonts": e(FONT_URL.format(families=theme_obj.fonts)),
         "theme_color": theme_obj.color,
         "commit": e(commit),
@@ -890,7 +907,7 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
                 "released_iso": known[record.id][0].released or "",
             }
             if not record.reserved:
-                item.update(format_label=FORMAT_LABELS[artifact_format(record)], sha256=d["sha256"],
+                item.update(format=artifact_format(record), format_label=FORMAT_LABELS[artifact_format(record)], sha256=d["sha256"],
                             artifact_name=unquote(record.asset_name), source=f"{record.owner}/{record.repo}",
                             steps=_install_steps_text(record))
             tv_apps.append(item)
@@ -898,14 +915,17 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
         rail = [("all", "All", total)] + [(kind, KIND_PLURALS[kind], sum(1 for r in available if r.data["kind"] == kind))
                                           for kind in KINDS]
         rail.append(("soon", "Coming soon", total - len(available)))
-        rail_html = "\n".join(f'  <button type="button" class="tv-rail__item" data-kind="{kind}" tabindex="-1">'
-                              f'{label}<span>{count}</span></button>' for kind, label, count in rail if count)
+        # Each label carries its words' key (site/shared/i18n.js); a section's name is the tab's.
+        tab_keys = {"all": "tab.all", "app": "tab.apps", "game": "tab.games", "tool": "tab.tools", "soon": "tab.soon"}
+        rail_html = "\n".join(f'  <button type="button" class="tv-rail__item" data-kind="{kind}" tabindex="-1" '
+                              f'data-i18n="{tab_keys[kind]}">{label}<span>{count}</span></button>'
+                              for kind, label, count in rail if count)
         # Then the categories, each a section of its own (tv.js reads "cat:<key>").
         shelf = {key: sum(1 for r in available if r.data["category"] == key) for key in CATEGORIES}
         if any(shelf.values()):
-            rail_html += '\n  <p class="tv-rail__label">Categories</p>\n' + "\n".join(
-                f'  <button type="button" class="tv-rail__item tv-rail__item--cat" data-kind="cat:{key}" tabindex="-1">'
-                f'{e(label)}<span>{shelf[key]}</span></button>' for key, label in CATEGORIES.items() if shelf[key])
+            rail_html += '\n  <p class="tv-rail__label" data-i18n="tv.cats">Categories</p>\n' + "\n".join(
+                f'  <button type="button" class="tv-rail__item tv-rail__item--cat" data-kind="cat:{key}" tabindex="-1" '
+                f'data-i18n="cat.{key}">{e(label)}<span>{shelf[key]}</span></button>' for key, label in CATEGORIES.items() if shelf[key])
         data = json.dumps({"apps": tv_apps, "categories": [{"key": key, "label": label} for key, label in CATEGORIES.items()]},
                           ensure_ascii=False, separators=(",", ":"))
         (root / "tv").mkdir()
@@ -954,9 +974,11 @@ def build_site(out: Path, apps_dir: Path, report: Report, base: str = DEFAULT_BA
               added=added, news=news_items)
 
     # Header and redirect rules, for a host that reads _headers and _redirects; GitHub Pages ignores them.
-    csp = ("default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com; "
-           "font-src https://fonts.gstatic.com; script-src 'self'; "
-           "connect-src 'self' https://raw.githubusercontent.com; "
+    csp = ("default-src 'self'; img-src 'self' data: https://*.google-analytics.com https://*.googletagmanager.com; "
+           "style-src 'self' https://fonts.googleapis.com; "
+           "font-src https://fonts.gstatic.com; script-src 'self' https://www.googletagmanager.com; "
+           "connect-src 'self' https://raw.githubusercontent.com https://translate.googleapis.com "
+           "https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com; "
            "base-uri 'self'; form-action 'none'; frame-ancestors 'none'")
     (out / "_headers").write_text(f"""/*
   X-Content-Type-Options: nosniff

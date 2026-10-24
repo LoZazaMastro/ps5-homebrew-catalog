@@ -167,15 +167,16 @@ def render(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
-def is_release_bump(old: Record, new: Record, github: GitHub) -> bool:
+def is_release_bump(old: Record, new: Record, github: GitHub, extra_fields: tuple[str, ...] = ()) -> bool:
     """True when new only moves old to its repository's newest release.
 
     Such an update can come from anyone, including the catalog bot: the release
-    it points at was published by the repository's owner.
+    it points at was published by the repository's owner. extra_fields are fields
+    the caller also lets change, for an author it has already shown to be the owner.
     """
     if old.reserved or new.reserved or old.data["source_repo"] != new.data["source_repo"]:
         return False
-    if any(old.data[f] != new.data[f] for f in old.data if f not in BUMP_FIELDS):
+    if any(old.data[f] != new.data[f] for f in old.data if f not in BUMP_FIELDS + extra_fields):
         return False
     release = newest_release(github, new.owner, new.repo)
     return bool(release) and release.get("tag_name") == new.tag

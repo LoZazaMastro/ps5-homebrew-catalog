@@ -1,0 +1,14 @@
+{
+  "titleid": "PPSA99318",
+  "name": "Art Swap",
+  "kind": "app",
+  "category": "utilities",
+  "description": "Change any title's home-screen icon, background, logo and music with SteamGridDB art (your own free key) and your own songs, keep the originals, and rename homebrew through ShadowMountPlus.",
+  "license": "GPL-3.0",
+  "author": "Gary Riches",
+  "version": "1.3.1",
+  "source_repo": "https://github.com/griches/PS5_ArtSwap",
+  "artifact_url": "https://github.com/griches/PS5_ArtSwap/releases/download/v1.3.1/PS5_ArtSwap-v1.3.1.zip",
+  "sha256": "b7db472827d8107e5128415d351e50f63217b8d294aadfaa25d90cffd45cd4da",
+  "icon_url": "https://raw.githubusercontent.com/griches/PS5_ArtSwap/v1.3.1/ps5/sce_sys/icon0.png"
+}

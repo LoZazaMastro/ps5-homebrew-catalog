@@ -147,6 +147,11 @@ class BumpPolicyTests(unittest.TestCase):
         older = FakeGitHub([release("v0.7.0", [])])
         self.assertFalse(is_release_bump(self.old, self.new, older))
 
+    def test_description_may_change_only_when_allowed(self):
+        edited = Record(self.new.path, dict(self.new.data, description="A new description."))
+        self.assertFalse(is_release_bump(self.old, edited, self.github))
+        self.assertTrue(is_release_bump(self.old, edited, self.github, ("description",)))
+
     def test_bot_may_open_a_bump_but_not_other_changes(self):
         report = Report()
         check_publisher("catalog-bot[bot]", False, self.old, self.new, self.github, report)

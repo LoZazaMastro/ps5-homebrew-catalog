@@ -22,7 +22,7 @@ from .records import Record
 SCHEMA = 1
 ACTIVE = "App comments"      # the category the discussions of listed apps are in
 WITHDRAWN = "Withdrawn"      # where a discussion goes, locked, when its app leaves the catalog
-LATEST = 10                  # comments kept per app
+LATEST = 50                  # comments kept per app
 MAX_TEXT = 500               # characters kept per comment
 SITE = "https://prosperostore.net"
 # The marker keeps its old name; it holds the record's id, which is the title ID for most apps.
@@ -46,14 +46,18 @@ LIST = """query($owner: String!, $name: String!, $after: String) {
         id number title body url locked
         category { name }
         upvoteCount
+        counted: comments(first: 100) { nodes { replies(first: 1) { totalCount } } }
         comments(last: %d) {
           totalCount
-          nodes { author { login } createdAt bodyText isMinimized }
+          nodes {
+            author { login } createdAt bodyText isMinimized
+            replies(last: %d) { totalCount nodes { author { login } createdAt bodyText isMinimized } }
+          }
         }
       }
     }
   }
-}""" % LATEST
+}""" % (LATEST, LATEST)
 
 CREATE = """mutation($repository: ID!, $category: ID!, $title: String!, $body: String!) {
   createDiscussion(input: {repositoryId: $repository, categoryId: $category, title: $title, body: $body}) {
@@ -121,18 +125,27 @@ def read_threads(nodes: list[dict], out_of_scope: frozenset[str] | set[str] = fr
         marker = MARKER.search(node.get("body") or "")
         if not marker or marker.group(1) in threads:
             continue
+        # Replies to a comment are comments too: each follows its parent, as in the discussion.
+        everything = []
+        for comment in node["comments"]["nodes"]:
+            everything.append(comment)
+            everything += (comment.get("replies") or {}).get("nodes") or []
+        # The count takes in the replies of every comment (the first 100), not only of the latest ones.
+        tally = (node.get("counted") or node["comments"])["nodes"]
+        replies = sum((c.get("replies") or {}).get("totalCount") or 0 for c in tally)
         latest = []
-        for comment in reversed(node["comments"]["nodes"]):      # newest first
+        for comment in reversed(everything):                     # newest first
             author = (comment.get("author") or {}).get("login") or "ghost"
             text = clean(comment.get("bodyText") or "")
             if comment.get("isMinimized") or author.casefold() in out_of_scope or not text:
                 continue
-            latest.append({"author": author, "date": comment["createdAt"], "text": text})
+            if len(latest) < LATEST:
+                latest.append({"author": author, "date": comment["createdAt"], "text": text})
         threads[marker.group(1)] = Thread(
             id=node["id"], number=node["number"], url=node["url"], title=node["title"],
             titleid=marker.group(1), category=(node.get("category") or {}).get("name", ""),
             locked=bool(node.get("locked")), likes=node.get("upvoteCount") or 0,
-            comments=node["comments"]["totalCount"], latest=latest)
+            comments=node["comments"]["totalCount"] + replies, latest=latest)
     return threads
 
 
@@ -205,27 +218,38 @@ def list_nodes(github: GitHub, owner: str, name: str) -> list[dict]:
         after = page["pageInfo"]["endCursor"]
 
 
-def apply(actions: list[tuple], github: GitHub, repository: str, categories: dict[str, str]) -> None:
-    """Carry the plan out. A failure raises GitHubError and leaves the rest for the next run."""
-    created = False
+def apply(actions: list[tuple], github: GitHub, repository: str, categories: dict[str, str]) -> list[str]:
+    """Carry the plan out, and say what GitHub refused. A refused action doesn't hold up the rest;
+    after a refused creation no more are tried (GitHub stops a long row of them part-way), and the
+    next run tries again."""
+    refused: list[str] = []
+    created, creating = False, True
     for action in actions:
         kind, subject = action[0], action[1]
-        if kind == "create":
-            if created:
-                time.sleep(PAUSE)
-            github.graphql(CREATE, {"repository": repository, "category": categories[ACTIVE],
-                                    "title": thread_title(subject), "body": thread_body(subject)})
-            created = True
-        elif kind == "rename":
-            github.graphql(UPDATE, {"id": subject.id, "title": action[2]})
-        elif kind == "restore":
-            github.graphql(UPDATE, {"id": subject.id, "category": categories[ACTIVE]})
-            if subject.locked:
-                github.graphql(UNLOCK, {"id": subject.id})
-        elif kind == "withdraw":
-            if WITHDRAWN in categories:
-                github.graphql(UPDATE, {"id": subject.id, "category": categories[WITHDRAWN]})
-            if not subject.locked:
-                github.graphql(LOCK, {"id": subject.id})
-        else:
-            raise GitHubError(f"unknown action {kind}")
+        if kind == "create" and not creating:
+            continue
+        try:
+            if kind == "create":
+                if created:
+                    time.sleep(PAUSE)
+                github.graphql(CREATE, {"repository": repository, "category": categories[ACTIVE],
+                                        "title": thread_title(subject), "body": thread_body(subject)})
+                created = True
+            elif kind == "rename":
+                github.graphql(UPDATE, {"id": subject.id, "title": action[2]})
+            elif kind == "restore":
+                github.graphql(UPDATE, {"id": subject.id, "category": categories[ACTIVE]})
+                if subject.locked:
+                    github.graphql(UNLOCK, {"id": subject.id})
+            elif kind == "withdraw":
+                if WITHDRAWN in categories:
+                    github.graphql(UPDATE, {"id": subject.id, "category": categories[WITHDRAWN]})
+                if not subject.locked:
+                    github.graphql(LOCK, {"id": subject.id})
+            else:
+                raise ValueError(f"unknown action {kind}")
+        except GitHubError as error:
+            refused.append(f"could not {describe(action)}: {error}")
+            if kind == "create":
+                creating = False
+    return refused

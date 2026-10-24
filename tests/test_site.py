@@ -128,8 +128,8 @@ class SiteBuildTests(unittest.TestCase):
         with mock.patch.object(site, "source_commit_time", lambda commit: "2026-10-03T04:05:00Z"):
             self.build()
         page = (self.out / "index.html").read_text(encoding="utf-8")
-        self.assertIn('abc1234</a> · last updated <time datetime="2026-10-03T04:05:00Z">3 Oct 2026, 04:05 UTC</time>.',
-                      page)
+        self.assertIn('abc1234</a></span><span data-i18n="foot.updated" data-v-time="2026-10-03T04:05:00Z"> · last updated '
+                      '3 Oct 2026, 04:05 UTC</span>.', page)
         self.assertIn('Maintained by <a href="https://github.com/darkxex">darkxex</a>, created by <a href="https://github.com/blackbearreloaded">BlackBearReloaded</a> · Built from', page)
         self.assertIn('<a class="notice"', page)
         self.assertIn('href="https://github.com/darkxex/ProsperoStore/releases"', page)
@@ -137,8 +137,9 @@ class SiteBuildTests(unittest.TestCase):
         self.assertIn('data-comments="https://raw.githubusercontent.com/darkxex/ps5-homebrew-catalog/comments-data/v1/"', tv)
         # The QR library is one of the site's own files and comes before the script that uses it.
         self.assertRegex(tv, r'<script src="/assets/qrcode\.[0-9a-f]+\.js" defer></script>\n<script src="/assets/tv\.')
-        self.assertIn('<p class="tv-credit">Maintained by darkxex, created by BlackBearReloaded · Built from abc1234 · last updated '
-                      '<time datetime="2026-10-03T04:05:00Z">3 Oct 2026, 04:05 UTC</time></p>', tv)
+        self.assertIn('<p class="tv-credit"><span data-i18n="tv.credit" data-v-short="abc1234">Maintained by darkxex, created by '
+                      'BlackBearReloaded · Built from abc1234</span><span data-i18n="foot.updated" data-v-time="2026-10-03T04:05:00Z">'
+                      ' · last updated 3 Oct 2026, 04:05 UTC</span></p>', tv)
         self.assertEqual(site._commit_time_html(None), "")
 
     def test_metadata_is_escaped(self):
@@ -197,7 +198,7 @@ class SiteBuildTests(unittest.TestCase):
         self.assertLess(detail.index('data-react="likes"'), detail.index('class="article"'))
         self.assertIn('data-react="comments"', detail)
         self.assertIn('href="https://github.com/darkxex/ps5-homebrew-catalog/discussions?discussions_q=PPSA01234"', detail)
-        self.assertIn("connect-src 'self' https://raw.githubusercontent.com;", (self.out / "_headers").read_text(encoding="utf-8"))
+        self.assertIn("connect-src 'self' https://raw.githubusercontent.com https://translate.googleapis.com ", (self.out / "_headers").read_text(encoding="utf-8"))
         self.assertIn("/api/*/manifest.sig\n  Content-Type: application/octet-stream",
                       (self.out / "_headers").read_text(encoding="utf-8"))
         # The manifest names every JSON file of the API by its hash; the build itself never signs.
@@ -239,7 +240,7 @@ class SiteBuildTests(unittest.TestCase):
         index = json.loads((api / "index.json").read_text(encoding="utf-8"))
         self.assertEqual([a["sandbox"] for a in index["apps"]], ["leaves", None, None])
         page = (self.out / "app" / "PPSA01234" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('<h2 id="safety-title">Safety</h2>', page)
+        self.assertIn('<h2 id="safety-title" data-i18n="safety.title">Safety</h2>', page)
         self.assertIn("Leaves the sandbox", page)
         self.assertIn("1 helper(s) not reviewed", page)
         self.assertIn("Released by a workflow", page)
@@ -268,10 +269,10 @@ class SiteBuildTests(unittest.TestCase):
         self.assertEqual((app["release_notes"], app["release_notes_truncated"]),
                          ("Fixed\n- Menus open faster alert(1)", False))
         page = (self.out / "app" / "PPSA01234" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('<h2 id="notes-title">Release notes</h2>', page)
+        self.assertIn('<h2 id="notes-title" data-i18n="notes.title">Release notes</h2>', page)
         self.assertIn("<li>Menus open faster alert(1)</li>", page)
         self.assertNotIn("<script>alert", page)
-        self.assertIn('rel="nofollow">See this release on GitHub</a>', page)
+        self.assertIn('rel="nofollow" data-i18n="notes.see">See this release on GitHub</a>', page)
         # An icon's address changes with the picture, so no cache can answer it with an older one.
         import hashlib
         fingerprint = hashlib.sha256(png).hexdigest()[:16]
@@ -312,8 +313,8 @@ class SiteBuildTests(unittest.TestCase):
         self.assertIn('data-category-label="Utilities"', home)
         self.assertIn("data-cats", home)
         page = (self.out / "app" / "PPSA04321" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('href="/?category=utilities">Utilities</a>', page)
-        self.assertIn("<dt>Category</dt><dd>Utilities</dd>", page)
+        self.assertIn('href="/?category=utilities" data-i18n="cat.utilities">Utilities</a>', page)
+        self.assertIn('<dt data-i18n="d.category">Category</dt><dd data-i18n="cat.utilities">Utilities</dd>', page)
         tv = (self.out / "tv" / "index.html").read_text(encoding="utf-8")
         self.assertIn('data-kind="cat:utilities"', tv)
         self.assertNotIn('data-kind="cat:emulators"', tv)  # a category without apps gets no entry
@@ -507,6 +508,64 @@ class IconCacheTests(unittest.TestCase):
             self.assertEqual(reads, [(record()["artifact_url"], "PPSA01234/sce_sys/icon0.png")])
             self.assertEqual(len(list(cache.glob("*.img"))), 1)
             self.assertTrue(list((root / "out1").rglob("icon-PPSA01234*")))
+
+
+class TranslationTests(unittest.TestCase):
+    """site/shared/i18n.js: every language says the same things, and the records are never what is translated."""
+
+    SCRIPT = (site.SITE / "shared" / "i18n.js").read_text(encoding="utf-8")
+
+    def words(self) -> dict[str, set[str]]:
+        import re
+        start = self.SCRIPT.index("var WORDS = {")
+        found = {}
+        for match in re.finditer(r"^    (\w\w): \{\n(.*?)^    \}", self.SCRIPT[start:], re.S | re.M):
+            found[match.group(1)] = set(re.findall(r'(?<!\\)"([a-z][\w.\-]*)": ', match.group(2)))
+        return found
+
+    def test_every_language_has_the_same_words(self):
+        found = self.words()
+        self.assertEqual(sorted(found), ["de", "en", "es", "fr", "ja", "nl", "pt", "tr"])
+        for code, keys in found.items():
+            self.assertEqual(sorted(found["en"] - keys), [], f"{code} lacks words")
+            self.assertEqual(sorted(keys - found["en"]), [], f"{code} has words English does not")
+
+    def test_every_category_and_kind_is_named_in_every_language(self):
+        from catalog.records import CATEGORIES
+        for code, keys in self.words().items():
+            for category in CATEGORIES:
+                self.assertIn(f"cat.{category}", keys, f"{code}: category {category}")
+            for kind in ("app", "game", "tool"):
+                self.assertIn(f"kind.{kind}", keys, f"{code}: kind {kind}")
+
+    def test_every_key_the_templates_use_exists(self):
+        import re
+        known = self.words()["en"]
+        used = set()
+        for path in list((site.SITE / "themes" / "farlight").glob("*.html")) + [site.SITE / "shared" / "tv.js", site.SITE / "themes" / "farlight" / "app.js"]:
+            text = path.read_text(encoding="utf-8")
+            used |= set(re.findall(r'data-i18n(?:-html)?="([\w.\-]+)"', text))
+            used |= set(re.findall(r'I18N\.(?:t|html|text)\("([\w.\-]+)"', text))
+            used |= set(re.findall(r'data-i18n-attr="[\w\-]+:([\w.\-]+)"', text))
+        used |= set(re.findall(r'data-i18n(?:-html)?="([\w.\-]+)"', (Path(site.__file__)).read_text(encoding="utf-8")))
+        dynamic = {key for key in used if "$" in key or "{" in key or key.endswith(".")}  # built from a record's field
+        self.assertEqual(sorted(k for k in used - dynamic if k not in known), [])
+
+    def test_the_pages_load_the_words_before_the_scripts_that_use_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apps = root / "apps"
+            apps.mkdir()
+            write_record(apps, record())
+            out = root / "out"
+            build_site(out, apps, Report())
+            page = (out / "index.html").read_text(encoding="utf-8")
+            self.assertRegex(page, r'<script src="/assets/i18n\.[0-9a-f]+\.js"></script>\n<script src="/assets/app\.')
+            tv = (out / "tv" / "index.html").read_text(encoding="utf-8")
+            self.assertRegex(tv, r'<script src="/assets/i18n\.[0-9a-f]+\.js"></script>')
+            # The records keep their own words: the category is the record's key and the page's English.
+            self.assertEqual(json.loads((out / "api" / "v1" / "apps" / "PPSA01234.json").read_text(encoding="utf-8"))["category"],
+                             record()["category"])
 
 
 if __name__ == "__main__":

@@ -55,13 +55,14 @@
 
   var root = document.documentElement;
   root.classList.add("js");
+  var I18N = window.I18N; // the words, in the reader's language (site/shared/i18n.js)
 
   var SECTIONS = {
-    discover: { title: "Discover" },
-    apps: { title: "Apps", kind: "app" },
-    games: { title: "Games", kind: "game" },
-    tools: { title: "Tools", kind: "tool" },
-    soon: { title: "Coming soon", soon: true }
+    discover: { title: "tab.discover" },
+    apps: { title: "tab.apps", kind: "app" },
+    games: { title: "tab.games", kind: "game" },
+    tools: { title: "tab.tools", kind: "tool" },
+    soon: { title: "tab.soon", soon: true }
   };
   var BANNER_SECONDS = 8;
   var FEATURED = 5;
@@ -83,9 +84,9 @@
       button.addEventListener("click", function () {
         var text = button.getAttribute("data-copy");
         var done = function () {
-          button.textContent = "Copied";
+          button.textContent = I18N.t("copied");
           button.classList.add("is-done");
-          setTimeout(function () { button.textContent = "Copy"; button.classList.remove("is-done"); }, 1600);
+          setTimeout(function () { button.textContent = I18N.t("copy"); button.classList.remove("is-done"); }, 1600);
         };
         if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () {});
       });
@@ -139,9 +140,9 @@
         sortName: item.getAttribute("data-name"),
         author: item.getAttribute("data-by"),
         kind: item.getAttribute("data-app-kind"),
-        kindLabel: item.getAttribute("data-kind-label"),
+        kindLabel: I18N.kind(item.getAttribute("data-app-kind"), item.getAttribute("data-kind-label")),
         category: item.getAttribute("data-category") || "",
-        categoryLabel: item.getAttribute("data-category-label") || "",
+        categoryLabel: I18N.category(item.getAttribute("data-category"), item.getAttribute("data-category-label") || ""),
         categoryRank: Number(item.getAttribute("data-category-rank")) || 0,
         soon: item.getAttribute("data-status") === "soon",
         updated: item.getAttribute("data-updated") || "",
@@ -168,8 +169,8 @@
     };
     var byAdded = function (a, b) { return a.added < b.added ? 1 : a.added > b.added ? -1 : byName(a, b); };
     var byLikes = function (a, b) { return b.likes - a.likes || byName(a, b); };
-    var ORDERS = { name: { label: "Name", by: byName }, updated: { label: "Recently updated", by: byReleased },
-                   liked: { label: "Most liked", by: byLikes } };
+    var ORDERS = { name: { label: I18N.t("order.name"), by: byName }, updated: { label: I18N.t("order.updated"), by: byReleased },
+                   liked: { label: I18N.t("order.liked"), by: byLikes } };
     var likesKnown = false; // "Most liked" is offered once the likes have arrived
     // The categories, in the catalog's order, as the tiles carry them.
     var categories = [];
@@ -227,13 +228,14 @@
         if (tile && !calm) tile.style.animationDelay = Math.min(index, 11) * 35 + "ms";
       });
       var category = !terms.length && state.category ? categoryNamed(state.category) : null;
-      var heading = section.title === "Discover" ? "PS5 homebrew" : section.title;
-      if (category) heading = section.title === "Discover" ? category.label : section.title + " · " + category.label;
-      title.textContent = terms.length ? "Results for “" + state.query + "”" : heading;
+      var sectionTitle = I18N.t(section.title);
+      var heading = state.section === "discover" ? I18N.t("heading.home") : sectionTitle;
+      if (category) heading = state.section === "discover" ? category.label : sectionTitle + " · " + category.label;
+      title.textContent = terms.length ? I18N.t("heading.results", { q: state.query }) : heading;
       count.textContent = shown.length;
       empty.hidden = shown.length !== 0;
       sortName.textContent = ORDERS[state.sort].label;
-      document.title = (terms.length ? "Search" : category ? category.label : section.title) + " — PS5 Homebrew Store";
+      document.title = (terms.length ? I18N.t("title.search") : category ? category.label : sectionTitle) + " — " + I18N.t("title.suffix");
       paintCategories(terms.length > 0);
     }
 
@@ -251,7 +253,7 @@
       categoryBox.textContent = "";
       categoryBox.hidden = searching || (present.length < 2 && !state.category);
       if (categoryBox.hidden) return;
-      [{ key: "", label: "All" }].concat(present).forEach(function (one) {
+      [{ key: "", label: I18N.t("cats.all") }].concat(present).forEach(function (one) {
         var button = document.createElement("button");
         button.type = "button";
         button.className = "cat";
@@ -288,19 +290,19 @@
         return fresh.indexOf(app) < 0 && app.released && (!app.added || app.released > app.added);
       }).sort(byReleased).slice(0, NEW_AND_UPDATED);
       featured = available.filter(function (app) { return app.released; }).sort(byReleased).slice(0, FEATURED);
-      addShelf({ title: "New in the catalog", apps: fresh });
-      addShelf({ title: "Recently updated", apps: renewed });
+      addShelf({ title: I18N.t("shelf.new"), apps: fresh });
+      addShelf({ title: I18N.t("shelf.updated"), apps: renewed });
       // A build without dates (offline) keeps the one shelf of the last changes.
       if (!fresh.length && !renewed.length) {
         var changed = available.slice().sort(byUpdated).slice(0, NEW_AND_UPDATED);
         featured = changed.slice(0, FEATURED);
-        addShelf({ title: "New and updated", apps: changed });
+        addShelf({ title: I18N.t("shelf.changed"), apps: changed });
       }
       topShelves = shelvesBox.children.length;
       categories.forEach(function (one) {
         addShelf({ title: one.label, category: one.key, apps: available.filter(function (app) { return app.category === one.key; }).sort(byName) });
       });
-      addShelf({ title: "Coming soon", apps: apps.filter(function (app) { return app.soon; }).sort(byName) });
+      addShelf({ title: I18N.t("tab.soon"), apps: apps.filter(function (app) { return app.soon; }).sort(byName) });
       paintStats();
       addLikedShelf();
     }
@@ -322,7 +324,7 @@
         var all = document.createElement("a");
         all.className = "shelf__all";
         all.href = base + "?category=" + encodeURIComponent(shelf.category);
-        all.textContent = "See all";
+        all.textContent = I18N.t("shelf.all");
         all.addEventListener("click", function (event) {
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
           event.preventDefault();
@@ -349,7 +351,7 @@
         var button = document.createElement("button");
         button.type = "button";
         button.className = "shelf__go shelf__go--" + way;
-        button.setAttribute("aria-label", way === "prev" ? "Earlier in " + shelf.title : "More of " + shelf.title);
+        button.setAttribute("aria-label", I18N.t(way === "prev" ? "shelf.prev" : "shelf.next", { title: shelf.title }));
         button.textContent = way === "prev" ? "‹" : "›";
         button.addEventListener("click", function () {
           tiles.scrollBy({ left: (way === "prev" ? -0.8 : 0.8) * tiles.clientWidth, behavior: calm ? "auto" : "smooth" });
@@ -378,7 +380,7 @@
       var stats = document.createElement("span");
       stats.className = "tile__stats";
       stats.setAttribute("role", "img");
-      stats.setAttribute("aria-label", app.likes + (app.likes === 1 ? " like, " : " likes, ") + app.comments + (app.comments === 1 ? " comment" : " comments"));
+      stats.setAttribute("aria-label", I18N.t("stats.aria", { likes: I18N.t("n.likes", { n: app.likes }), comments: I18N.t("n.comments", { n: app.comments }) }));
       var likes = document.createElement("b");
       likes.textContent = "▲ " + app.likes;
       stats.appendChild(likes);
@@ -415,7 +417,7 @@
       if (likedShelfReady || !shelvesReady || !likesKnown) return;
       likedShelfReady = true;
       var liked = apps.filter(function (app) { return !app.soon && app.likes > 0; }).sort(byLikes).slice(0, MOST_LIKED);
-      addShelf({ title: "Most liked", apps: liked, dress: function (tile, app, position) {
+      addShelf({ title: I18N.t("shelf.liked"), apps: liked, dress: function (tile, app, position) {
         tile.setAttribute("data-ranked", "");
         dressTile(tile, null);
         var rank = document.createElement("span");
@@ -426,9 +428,9 @@
         if (!line) return;
         line.textContent = "";
         var likes = document.createElement("b");
-        likes.textContent = "▲ " + app.likes;
+        likes.textContent = "▲ " + I18N.t("n.likes", { n: app.likes });
         line.appendChild(likes);
-        line.appendChild(document.createTextNode((app.likes === 1 ? " like" : " likes") + "  ·  " + app.comments + (app.comments === 1 ? " comment" : " comments")));
+        line.appendChild(document.createTextNode("  ·  " + I18N.t("n.comments", { n: app.comments })));
       } }, shelvesBox.children[topShelves]);
     }
 
@@ -447,10 +449,19 @@
     var wordsTimer = 0;
 
     function kickerFor(app, featuredNow) {
-      if (app.soon) return "Coming soon";
-      if (featuredNow) return banner === 0 ? "New release" : "Featured";
+      if (app.soon) return I18N.t("tab.soon");
+      if (featuredNow) return I18N.t(banner === 0 ? "stage.new" : "stage.featured");
       return app.categoryLabel || app.kindLabel;
     }
+    var stageToggle = $("[data-stage-toggle]", stage);
+    var translated = null;
+    var showingTranslation = true; /* One choice for every slide of the carousel. */
+    stageToggle.addEventListener("click", function () {
+      if (!translated) return;
+      showingTranslation = !showingTranslation;
+      $("[data-stage-text]", stage).textContent = showingTranslation ? translated.text : translated.original;
+      stageToggle.textContent = I18N.t(showingTranslation ? "translate.original" : "translate.translated");
+    });
     function fillWords(app, kicker) {
       $("[data-stage-kicker]", stage).textContent = kicker;
       $("[data-stage-title]", stage).textContent = app.name;
@@ -458,7 +469,18 @@
       if (app.version) meta.push(app.version.replace(/^v(?=\d)/, ""));
       if (app.size) meta.push(app.size);
       $("[data-stage-meta]", stage).textContent = meta.join("  ·  ");
-      $("[data-stage-text]", stage).textContent = app.description;
+      var stageText = $("[data-stage-text]", stage);
+      stageText.textContent = app.description;
+      /* Machine-translated: the button appears once the translation is in; the chosen side stays across slides. */
+      translated = null;
+      stageToggle.classList.add("stage__toggle--off");
+      I18N.translate(app.description, function (text) {
+        if (stageText.textContent !== app.description) return;
+        translated = { original: app.description, text: text };
+        stageText.textContent = showingTranslation ? text : app.description;
+        stageToggle.textContent = I18N.t(showingTranslation ? "translate.original" : "translate.translated");
+        stageToggle.classList.remove("stage__toggle--off");
+      });
       $("[data-stage-link]", stage).setAttribute("href", app.url);
       $("[data-stage-mark]", stage).hidden = !app.soon;
     }
@@ -516,6 +538,35 @@
         if (!held && !document.hidden && state.section === "discover" && !state.query && !state.category) showBanner(banner + 1);
       }, BANNER_SECONDS * 1000);
     }
+    /* Swipe the stage sideways with a finger, as the shelves below: the words follow it, and
+       letting go past a short distance goes to the next or previous featured app. */
+    var dragFrom = null;
+    var dragged = false;
+    function dragEnd(event, cancelled) {
+      if (!dragFrom) return;
+      var across = event.clientX - dragFrom.x;
+      dragFrom = null;
+      words.style.transition = "";
+      words.style.transform = "";
+      if (!dragged || cancelled || Math.abs(across) < 60) return;
+      showBanner(banner + (across < 0 ? 1 : -1));
+      startBanner();
+    }
+    stage.addEventListener("pointerdown", function (event) {
+      if (event.pointerType !== "touch" || featured.length < 2 || held || (event.target.closest && event.target.closest("a, button"))) return;
+      dragFrom = { x: event.clientX, y: event.clientY };
+      dragged = false;
+    });
+    stage.addEventListener("pointermove", function (event) {
+      if (!dragFrom) return;
+      var across = event.clientX - dragFrom.x;
+      if (!dragged && Math.abs(across) > 10 && Math.abs(across) > Math.abs(event.clientY - dragFrom.y)) dragged = true;
+      if (!dragged) return;
+      words.style.transition = "none";
+      words.style.transform = "translateX(" + Math.round(across / 3) + "px)";
+    });
+    stage.addEventListener("pointerup", function (event) { dragEnd(event, false); });
+    stage.addEventListener("pointercancel", function (event) { dragEnd(event, true); });
     function hold(tile) {
       var id = tile.getAttribute("data-shelf-app");
       var app = apps.filter(function (one) { return one.id === id; })[0];
@@ -551,7 +602,7 @@
         buildShelves();
         if (featured.length && onStage === null) { showBanner(0); startBanner(); }
         else if (featured.length && !held) show(featured[banner], true);
-        document.title = "PS5 Homebrew Store — community apps, games and tools";
+        document.title = I18N.t("title.home");
       } else {
         showGrid();
         setTint("#42358f");
@@ -638,7 +689,7 @@
   /* Everything in the file is other people's text: it goes in as text, never as markup. */
   function showComments(box, data) {
     var list = $("[data-comments-list]", box);
-    var latest = Array.isArray(data.latest) ? data.latest.slice(0, 10) : [];
+    var latest = Array.isArray(data.latest) ? data.latest.slice(0, 50) : [];
     if (!list || !latest.length) return;
     latest.forEach(function (comment) {
       if (!comment || typeof comment.text !== "string" || !comment.text) return;
@@ -646,10 +697,10 @@
       var by = document.createElement("span");
       by.className = "comments__by";
       var author = document.createElement("b");
-      author.textContent = String(comment.author || "someone").slice(0, 40);
+      author.textContent = String(comment.author || I18N.t("comments.someone")).slice(0, 40);
       by.appendChild(author);
       var when = new Date(comment.date);
-      if (!isNaN(when)) by.appendChild(document.createTextNode("  ·  " + when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })));
+      if (!isNaN(when)) by.appendChild(document.createTextNode("  ·  " + when.toLocaleDateString(I18N.lang, { year: "numeric", month: "short", day: "numeric" })));
       var text = document.createElement("span");
       text.className = "comments__text";
       text.textContent = comment.text.slice(0, 500);
@@ -664,7 +715,7 @@
     if (none) none.hidden = true;
     if (more) {
       more.hidden = false;
-      if (data.comments > latest.length) $("a", more).textContent = "Read all " + Math.floor(data.comments) + " comments on GitHub";
+      if (data.comments > latest.length) $("a", more).textContent = I18N.t("comments.readall", { n: Math.floor(data.comments) });
     }
   }
 

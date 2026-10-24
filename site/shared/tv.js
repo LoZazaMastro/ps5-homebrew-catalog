@@ -22,8 +22,9 @@
     PAGE_UP: 33, PAGE_DOWN: 34,
     GREEN: 154, CHAN_UP: 157, CHAN_DOWN: 158, NEXT: 176, PREV: 177, TOP_MENU: 131
   };
-  var SORTS = [["name", "Name"], ["updated", "Recently updated"], ["author", "Developer"], ["liked", "Most liked"]];
-  var HEADINGS = { all: "All", app: "Apps", game: "Games", tool: "Tools", soon: "Coming soon" };
+  var I18N = window.I18N; // the words, in the reader's language (site/shared/i18n.js)
+  var SORTS = [["name", "order.name"], ["updated", "order.updated"], ["author", "order.author"], ["liked", "order.liked"]];
+  var HEADINGS = { all: "tab.all", app: "tab.apps", game: "tab.games", tool: "tab.tools", soon: "tab.soon" }; // words' keys
   var REPEAT_MS = 110;
 
   var apps = [];
@@ -44,6 +45,9 @@
     return node;
   }
 
+  // An app's name is what its developer wrote: a browser's own translator must not touch it either.
+  function noTranslate(node) { node.setAttribute("translate", "no"); return node; }
+
   /* Likes and comments */
 
   function commentsFile(path, done) {
@@ -57,7 +61,7 @@
   }
 
   function whole(value) { return value > 0 ? Math.floor(value) : 0; }
-  function commentsLabel(comments) { return comments + (comments === 1 ? " comment" : " comments"); }
+  function commentsLabel(comments) { return I18N.t("n.comments", { n: comments }); }
 
   /* The third line of a tile, zero included, once the counts are known. */
   function paintTile(app) {
@@ -88,7 +92,7 @@
       svg.setAttribute("viewBox", "0 0 " + (size + 2 * quiet) + " " + (size + 2 * quiet));
       svg.setAttribute("shape-rendering", "crispEdges");
       svg.setAttribute("role", "img");
-      svg.setAttribute("aria-label", "QR code for " + address);
+      svg.setAttribute("aria-label", I18N.t("tv.qr", { address: address }));
       var paper = document.createElementNS(NS, "rect");
       paper.setAttribute("width", "100%");
       paper.setAttribute("height", "100%");
@@ -172,9 +176,9 @@
     img.loading = position < 20 ? "eager" : "lazy";
     img.decoding = "async";
     art.appendChild(img);
-    art.appendChild(make("span", "tv-tile__badge" + (app.soon ? " tv-tile__badge--soon" : ""), app.soon ? "Soon" : app.category_label || app.kind_label));
+    art.appendChild(make("span", "tv-tile__badge" + (app.soon ? " tv-tile__badge--soon" : ""), app.soon ? I18N.t("tv.soonbadge") : app.category_label || app.kind_label));
     item.appendChild(art);
-    item.appendChild(make("p", "tv-tile__name", app.name));
+    item.appendChild(noTranslate(make("p", "tv-tile__name", app.name)));
     item.appendChild(make("p", "tv-tile__meta", app.soon ? app.author : app.author + " · " + app.version_label));
     // The line is there from the start, so the tile keeps its height when the counts arrive.
     app.stats = make("p", "tv-tile__stats", "\u00a0");
@@ -191,10 +195,10 @@
     view.forEach(function (app, i) { fragment.appendChild(tile(app, i)); });
     el.grid.appendChild(fragment);
     el.empty.hidden = view.length > 0;
-    el.heading.textContent = HEADINGS[state.kind];
-    var sortLabel = SORTS.filter(function (s) { return s[0] === state.sort; })[0][1];
+    el.heading.textContent = state.kind.indexOf("cat:") === 0 ? I18N.category(state.kind.slice(4), HEADINGS[state.kind]) : I18N.t(HEADINGS[state.kind]);
+    var sortLabel = I18N.t(SORTS.filter(function (s) { return s[0] === state.sort; })[0][1]);
     el.sort.textContent = sortLabel;
-    el.status.textContent = view.length + (view.length === 1 ? " app" : " apps") + " · sorted by " + sortLabel.toLowerCase();
+    el.status.textContent = I18N.t("tv.sortedby", { count: I18N.t("n.apps", { n: view.length }), sort: sortLabel.toLocaleLowerCase(I18N.lang) });
     railItems.forEach(function (item) { item.classList.toggle("is-current", item.dataset.kind === state.kind); });
     state.index = Math.min(state.index, Math.max(view.length - 1, 0));
   }
@@ -219,12 +223,13 @@
       target = railItems[state.rail];
       // The rail scrolls when the categories make it taller than the screen.
       if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
-      el.crossHint.textContent = target.dataset.action === "sort" ? "Change sort" : target.dataset.action === "exit" ? "Exit" : "Browse";
+      el.crossHint.textContent = I18N.t(target.dataset.action === "sort" ? "tv.hint.changesort" : target.dataset.action === "lang" ? "tv.hint.language"
+        : target.dataset.action === "exit" ? "tv.hint.exit" : "tv.hint.browse");
     } else {
       if (!view.length) return setFocus("rail", state.rail);
       state.index = Math.max(0, Math.min(index, view.length - 1));
       target = el.grid.children[state.index];
-      el.crossHint.textContent = "Open";
+      el.crossHint.textContent = I18N.t("tv.hint.open");
       reveal(target);
     }
     target.classList.add("is-focused");
@@ -286,37 +291,39 @@
     d.appendChild(art);
 
     var info = make("div", "tv-detail__info");
-    info.appendChild(make("p", "tv-kicker", (app.soon ? "Coming soon" : app.category_label || app.kind_label) + " · " + app.titleid));
-    var name = make("h2", "tv-detail__name", app.name);
+    info.appendChild(make("p", "tv-kicker", (app.soon ? I18N.t("tab.soon") : app.category_label || app.kind_label) + " · " + app.titleid));
+    var name = noTranslate(make("h2", "tv-detail__name", app.name));
     name.id = "tv-detail-name";
     info.appendChild(name);
-    info.appendChild(make("p", "tv-detail__by", "by " + app.author));
-    info.appendChild(make("p", "tv-detail__desc", app.description));
+    info.appendChild(make("p", "tv-detail__by", I18N.t("tv.by", { author: app.author })));
+    var desc = make("p", "tv-detail__desc", app.description);
+    info.appendChild(desc);
+    I18N.translate(app.description, function (text) { desc.textContent = text; });
     var attrs = make("dl", "tv-attrs");
-    attr(attrs, "Version", app.version);
-    attr(attrs, "Format", app.format_label);
-    attr(attrs, "License", app.license);
-    attr(attrs, "Updated", app.updated);
-    attr(attrs, "Source", app.source);
+    attr(attrs, I18N.t("d.version"), app.version);
+    attr(attrs, I18N.t("d.format"), app.format_label);
+    attr(attrs, I18N.t("d.license"), app.license);
+    attr(attrs, I18N.t("d.updated"), app.updated);
+    attr(attrs, I18N.t("d.source"), app.source);
     info.appendChild(attrs);
     el.detailAttrs = attrs;
     showCounts(app);
 
     if (app.soon) {
-      info.appendChild(make("p", "tv-note", "This title ID is reserved by its developer. The app isn't released yet; it will appear here with a download once it is."));
+      info.appendChild(make("p", "tv-note", I18N.t("tv.reserved")));
     } else {
-      info.appendChild(make("h3", "tv-section-title", "Install"));
+      info.appendChild(make("h3", "tv-section-title", I18N.t("install.title")));
       var steps = make("ol", "tv-steps");
       app.steps.forEach(function (step) { steps.appendChild(make("li", "", step)); });
       info.appendChild(steps);
       var get = make("div", "tv-get");
-      get.appendChild(make("span", "", "Scan, or open on your computer or phone, to download it:"));
+      get.appendChild(make("span", "", I18N.t("tv.scan")));
       get.appendChild(make("strong", "", app.short_url));
       info.appendChild(scanRow("https://" + app.short_url, get));
-      var hash = make("p", "tv-hash", "SHA-256 of " + app.artifact_name);
+      var hash = make("p", "tv-hash", I18N.t("tv.hash", { file: app.artifact_name }));
       hash.appendChild(make("code", "", app.sha256.match(/.{1,8}/g).join(" ")));
       info.appendChild(hash);
-      info.appendChild(make("p", "tv-note", "Read the release notes first: some apps need a payload or extra setup. " + app.author + " is solely responsible for this app and its content."));
+      info.appendChild(make("p", "tv-note", I18N.t("tv.releasenote", { author: app.author })));
       // Filled when the app's comments arrive, if this app is still the one on screen.
       var comments = make("div", "tv-detail__comments");
       info.appendChild(comments);
@@ -336,7 +343,7 @@
     nav.appendChild(make("span", "", index > 0 ? "◀ " + view[index - 1].name : ""));
     var count = make("span");
     count.appendChild(make("b", "", String(index + 1)));
-    count.appendChild(document.createTextNode(" of " + view.length));
+    count.appendChild(document.createTextNode(I18N.t("tv.of", { i: "", total: view.length }).replace(/^\s+/, " ")));
     nav.appendChild(count);
     nav.appendChild(make("span", "", index < view.length - 1 ? view[index + 1].name + " ▶" : ""));
     d.appendChild(nav);
@@ -344,8 +351,8 @@
     d.hidden = false;
     el.detailInfo = info;
     document.body.classList.add("in-detail");
-    el.crossHint.textContent = "Back";
-    el.moveHint.textContent = "Previous / next · scroll";
+    el.crossHint.textContent = I18N.t("tv.hint.back");
+    el.moveHint.textContent = I18N.t("tv.hint.detail");
     writeHash();
   }
 
@@ -354,7 +361,7 @@
     var attrs = el.detailAttrs;
     if (!attrs || !(likesKnown || app.counted)) return;
     Array.prototype.forEach.call(attrs.querySelectorAll("[data-count]"), function (row) { attrs.removeChild(row); });
-    [["Likes", "▲ " + app.likes], ["Comments", String(app.comments)]].forEach(function (fact) {
+    [[I18N.t("d.likes"), "▲ " + app.likes], [I18N.t("d.comments"), String(app.comments)]].forEach(function (fact) {
       attr(attrs, fact[0], fact[1]);
       attrs.lastChild.setAttribute("data-count", "");
     });
@@ -362,28 +369,27 @@
 
   function showComments(box, app) {
     box.textContent = "";
-    box.appendChild(make("h3", "tv-section-title", "Comments (" + app.comments + ")"));
+    box.appendChild(make("h3", "tv-section-title", I18N.t("tv.comments", { n: app.comments })));
     var list = make("ul", "tv-comments");
     app.latest.forEach(function (comment) {
       if (!comment || typeof comment.text !== "string" || !comment.text) return;
       var entry = make("li");
       var when = new Date(comment.date);
-      var by = String(comment.author || "someone").slice(0, 40);
-      if (!isNaN(when)) by += " · " + when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      var by = String(comment.author || I18N.t("comments.someone")).slice(0, 40);
+      if (!isNaN(when)) by += " · " + when.toLocaleDateString(I18N.lang, { year: "numeric", month: "short", day: "numeric" });
       entry.appendChild(make("b", "", by));
       entry.appendChild(document.createTextNode(comment.text.slice(0, 500)));
       list.appendChild(entry);
     });
     if (list.children.length) box.appendChild(list);
-    var first = list.children.length ? "To like this app or comment" : "No comments yet. To write the first, or to like this app";
-    box.appendChild(scanRow(app.discussion, make("p", "tv-note", first + (app.discussion ? ", scan this code" : ", open " + app.short_url) +
-      " on your phone: it opens the app's discussion on GitHub, where a GitHub account is needed.")));
+    var which = "tv.cm." + (list.children.length ? "like" : "first") + (app.discussion ? ".scan" : ".open");
+    box.appendChild(scanRow(app.discussion, make("p", "tv-note", I18N.t(which, { url: app.short_url }))));
   }
 
   function closeDetail() {
     el.detail.hidden = true;
     document.body.classList.remove("in-detail");
-    el.moveHint.textContent = "Move";
+    el.moveHint.textContent = I18N.t("tv.hint.move");
     var index = state.detail;
     state.detail = -1;
     if (gridStale) {
@@ -425,6 +431,7 @@
       case KEY.RIGHT: if (view.length) setFocus("grid", state.index); break;
       case KEY.CROSS: case KEY.GREEN:
         if (item.dataset.action === "sort") cycleSort();
+        else if (item.dataset.action === "lang") I18N.choose(I18N.next()[0]);
         else if (item.dataset.action === "exit") location.href = item.href;
         else if (view.length) setFocus("grid", state.index);
         break;
@@ -536,6 +543,7 @@
       setFocus("rail", railItems.indexOf(target));
       if (event.type !== "click") return;
       if (target.dataset.action === "sort") cycleSort();
+      else if (target.dataset.action === "lang") I18N.choose(I18N.next()[0]);
       else if (target.dataset.kind) showKind(target.dataset.kind);
     }
   }
@@ -550,13 +558,28 @@
     } catch (error) { /* storage blocked */ }
     var data = JSON.parse($("tv-data").textContent);
     apps = data.apps;
-    (data.categories || []).forEach(function (category) { HEADINGS["cat:" + category.key] = category.label; });
-    apps.forEach(function (app) { app.sort_name = app.name.toLowerCase(); app.likes = 0; app.comments = 0; });
+    (data.categories || []).forEach(function (category) { HEADINGS["cat:" + category.key] = category.label; }); // English, for a key the words lack
+    apps.forEach(function (app) {
+      app.sort_name = app.name.toLowerCase(); app.likes = 0; app.comments = 0;
+      // The records stay as written; what the page says about them is put in the reader's language.
+      app.category_label = I18N.category(app.category, app.category_label);
+      app.kind_label = I18N.kind(app.kind, app.kind_label);
+      if (app.updated_iso) app.updated = I18N.date(app.updated_iso, false) || app.updated;
+      if (app.license === "Unlicensed") app.license = I18N.t("unlicensed");
+      if (!app.soon) {
+        app.format_label = I18N.t("fmt." + app.format);
+        var ids = { file: app.artifact_name, titleid: app.titleid, name: app.name };
+        app.steps = [1, 2, 3].map(function (n) { return I18N.text("step." + (app.format === "zip" ? "zip" : "img") + "." + n, ids); });
+      }
+    });
     el = {
       grid: $("tv-grid"), main: $("tv-main"), empty: $("tv-empty"), heading: $("tv-heading"),
       status: $("tv-status"), sort: $("tv-sort"), detail: $("tv-detail"), crossHint: $("tv-hint-cross"),
       moveHint: $("tv-hint-move")
     };
+    var language = $("tv-lang");
+    if (language) language.textContent = I18N.langs.filter(function (one) { return one[0] === I18N.lang; })[0][2]; // the name, no flag
+    document.title = I18N.t("tv.title");
     railItems = Array.prototype.slice.call(document.querySelectorAll(".tv-rail__item"));
     var openId = readHash();
     renderGrid();
